@@ -282,7 +282,7 @@ body {
 }
 .site-nav .primary-tabs a:hover { color: var(--text-strong); }
 .site-nav .primary-tabs a.active { color: var(--text-strong); border-bottom-color: var(--primary); }
-@media (max-width: 980px) { .primary-tabs { display: none; } }
+/* mobile nav handled in the responsive block at the foot of this file */
 .site-nav .utilities { display: flex; align-items: center; gap: 14px; }
 
 .window-switch {
@@ -1200,4 +1200,54 @@ footer.site-foot .legal {
   flex-wrap: wrap;
   gap: 1rem;
   justify-content: space-between;
+}
+
+/* ============================================================
+   Responsive — phones & small tablets
+   ============================================================ */
+@media (max-width: 820px) {
+  html, body { overflow-x: hidden; }
+
+  /* nav: brand + utilities on row 1, tabs scroll on row 2 */
+  .site-nav { height: auto; }
+  .site-nav .row {
+    grid-template-columns: auto 1fr;
+    row-gap: 8px;
+    padding-block: 9px;
+  }
+  .site-nav .brand { grid-column: 1; grid-row: 1; }
+  .site-nav .brand .wordmark { height: 22px; }
+  .site-nav .utilities { grid-column: 2; grid-row: 1; justify-self: end; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+  .window-switch { padding: 2px; }
+  .window-switch button { padding: 5px 8px; font-size: 10px; letter-spacing: 0.04em; }
+  .kicker { overflow-wrap: anywhere; }
+  .site-nav .primary-tabs {
+    grid-column: 1 / -1; grid-row: 2;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 1.25rem;
+    height: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .site-nav .primary-tabs::-webkit-scrollbar { display: none; }
+  .site-nav .primary-tabs a { white-space: nowrap; height: auto; padding: 2px 0; }
+  .window-switch button { padding: 5px 9px; }
+
+  /* the bid selector's sticky offset assumes a fixed-height nav — let it scroll on mobile */
+  .bid-sticky { position: static; }
+
+  /* tables scroll inside their card instead of stretching the page */
+  .full-table-host { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .full-table { min-width: 560px; }
+
+  /* long mono one-liners wrap instead of overflowing */
+  .mono-stamp, .dash-deck, .heat-legend { white-space: normal; overflow-wrap: anywhere; }
+
+  /* lookup bar wraps */
+  .lookup-bar { flex-wrap: wrap; }
+  .lookup-bar .search { max-width: none; min-width: 0; }
+
+  .dashboard { padding-block: clamp(1.5rem, 5vw, 2.5rem); }
 }
