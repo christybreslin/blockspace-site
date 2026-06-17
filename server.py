@@ -32,7 +32,6 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get("PORT", "8137"))
 WINDOW_MAX = 200          # rolling live blocks kept in memory
 SEED_N = 60               # blocks computed on startup
 POLL_SECS = 2             # head poll interval — catch new blocks fast
@@ -53,11 +52,15 @@ def load_env(path):
     return env
 
 _ENV = load_env(os.path.join(BASE, ".env"))
-RPC_URL = _ENV.get("EL_RPC_URL") or _ENV.get("RPC_URL") or _ENV.get("BEACON_URL")      # execution-layer JSON-RPC
-RPC_TOKEN = _ENV.get("EL_RPC_TOKEN") or _ENV.get("RPC_TOKEN") or _ENV.get("BEACON_TOKEN")
-INSECURE = os.environ.get("INSECURE") == "1" or _ENV.get("RPC_VERIFY", "true").lower() == "false"
+# config resolves from the process environment first, then .env
+def _cfg(key, default=None):
+    return os.environ.get(key) or _ENV.get(key) or default
+RPC_URL = _cfg("EL_RPC_URL") or _cfg("RPC_URL") or _cfg("BEACON_URL")      # execution-layer JSON-RPC
+RPC_TOKEN = _cfg("EL_RPC_TOKEN") or _cfg("RPC_TOKEN") or _cfg("BEACON_TOKEN")
+PORT = int(_cfg("PORT", "8137"))
+INSECURE = (_cfg("INSECURE") == "1") or (_cfg("RPC_VERIFY", "true").lower() == "false")
 if not RPC_URL:
-    raise SystemExit("No RPC URL in .env (expected EL_RPC_URL)")
+    raise SystemExit("No RPC URL — set EL_RPC_URL in .env (copy .env.example)")
 
 _SSL = ssl._create_unverified_context() if INSECURE else None
 
