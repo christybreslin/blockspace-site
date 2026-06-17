@@ -1,0 +1,174 @@
+ https://dune.com/queries/7725053/11686904?sidebar=none
+
+WITH params AS (
+    SELECT
+        date_add('month', -24, date_trunc('day', NOW())) AS start_ts,  -- ← 24-month look-back
+        date_trunc('day', NOW())                         AS end_ts
+),
+
+block_info AS (
+    SELECT
+        time,
+        execution_payload_block_number          AS block_number,
+        cardinality(execution_payload_transactions) AS num_tx,
+        execution_payload_base_fee_per_gas       AS base_fee_per_gas,
+        from_utf8(substr(execution_payload_extra_data, 1)) AS builder
+    FROM beacon.blocks
+    WHERE execution_payload_block_number > 15537394             -- the merge (now redundant vs window)
+      AND time >= (SELECT start_ts FROM params)
+      AND time <  (SELECT end_ts   FROM params)
+),
+
+mev_enriched AS (
+    SELECT
+        q1.*,
+        q2.value / 1e18           AS mev_payment,
+        q2.data,
+        q2.max_priority_fee_per_gas
+    FROM block_info q1
+    JOIN ethereum.transactions q2
+      ON q1.block_number = q2.block_number
+     AND q2.block_time >= (SELECT start_ts FROM params)
+     AND q2.block_time <  (SELECT end_ts   FROM params)
+    WHERE q2.index = q1.num_tx - 1
+),
+
+fully_enriched AS (
+    SELECT
+        q2.block_time,
+        q1.builder,
+        q1.mev_payment,
+        q1.data,
+        q1.max_priority_fee_per_gas,
+        SUM((q2.gas_price - q1.base_fee_per_gas) / 1e9 * q2.gas_used / 1e9) AS block_reward
+    FROM mev_enriched q1
+    JOIN ethereum.transactions q2
+      ON q1.block_number = q2.block_number
+     AND q2.block_time >= (SELECT start_ts FROM params)
+     AND q2.block_time <  (SELECT end_ts   FROM params)
+    GROUP BY 1,2,3,4,5
+),
+
+block_rewards AS (
+    SELECT
+        block_time,
+        CASE
+            WHEN builder LIKE '%geth%'           THEN block_reward
+            WHEN builder LIKE '%Nethermind%'     THEN block_reward
+            WHEN length(builder) < 2             THEN block_reward
+            WHEN mev_payment = 0                 THEN block_reward
+            WHEN data != 0x                      THEN block_reward
+            WHEN max_priority_fee_per_gas > 0    THEN block_reward
+            ELSE mev_payment
+        END AS execution_layer_reward
+    FROM fully_enriched
+)
+
+SELECT
+    date_trunc('day', block_time)                  AS day,
+    COUNT(*)                                       AS blocks,
+    approx_percentile(execution_layer_reward, 0.50) AS p50,
+    approx_percentile(execution_layer_reward, 0.50) AS p80,
+    approx_percentile(execution_layer_reward, 0.90) AS p90,
+    approx_percentile(execution_layer_reward, 0.99) AS p99
+FROM block_rewards
+GROUP BY 1
+ORDER BY 1
+
+
+
+
+
+
+
+
+
+
+
+
+https://dune.com/queries/7649952/11603948?sidebar=none
+
+
+WITH block_info AS (
+    SELECT
+        time,                                                   -- kept, for the time filter
+        execution_payload_block_number          AS block_number,
+        cardinality(execution_payload_transactions) AS num_tx,
+        execution_payload_base_fee_per_gas       AS base_fee_per_gas,
+        from_utf8(substr(execution_payload_extra_data, 1)) AS builder
+    FROM beacon.blocks
+    WHERE execution_payload_block_number > 15537394             -- the merge
+      AND time >= date_trunc('day', NOW()) - INTERVAL '24' MONTH -- window pushed down
+      AND time <  date_trunc('day', NOW())
+),
+
+mev_enriched AS (
+    SELECT
+        q1.*,
+        q2.value / 1e18           AS mev_payment,
+        q2.data,
+        q2.max_priority_fee_per_gas
+    FROM block_info q1
+    JOIN ethereum.transactions q2
+      ON q1.block_number = q2.block_number
+     AND q2.block_time >= date_trunc('day', NOW()) - INTERVAL '24' MONTH  -- prune partitions
+     AND q2.block_time <  date_trunc('day', NOW())
+    WHERE q2.index = q1.num_tx - 1
+),
+
+fully_enriched AS (
+    SELECT
+        q2.block_time,
+        q1.builder,
+        q1.mev_payment,
+        q1.data,
+        q1.max_priority_fee_per_gas,
+        SUM((q2.gas_price - q1.base_fee_per_gas) / 1e9 * q2.gas_used / 1e9) AS block_reward
+    FROM mev_enriched q1
+    JOIN ethereum.transactions q2
+      ON q1.block_number = q2.block_number
+     AND q2.block_time >= date_trunc('day', NOW()) - INTERVAL '24' MONTH
+     AND q2.block_time <  date_trunc('day', NOW())
+    GROUP BY 1,2,3,4,5
+),
+
+block_rewards AS (                                              -- your CASE logic, reward only
+    SELECT
+        block_time,
+        CASE
+            WHEN builder LIKE '%geth%'           THEN block_reward
+            WHEN builder LIKE '%Nethermind%'     THEN block_reward
+            WHEN length(builder) < 2             THEN block_reward
+            WHEN mev_payment = 0                 THEN block_reward
+            WHEN data != 0x                      THEN block_reward
+            WHEN max_priority_fee_per_gas > 0    THEN block_reward
+            ELSE mev_payment
+        END AS execution_layer_reward
+    FROM fully_enriched
+),
+
+bids(t) AS (
+    VALUES (0.02),(0.05),(0.1),(0.25),(0.5),(1.0),(2.0),(5.0)
+),
+
+gaps AS (
+    SELECT
+        b.t AS my_bid,
+        br.block_time,
+        date_diff('second',
+                  LAG(br.block_time) OVER (PARTITION BY b.t ORDER BY br.block_time),
+                  br.block_time) AS gap_secs
+    FROM block_rewards br
+    CROSS JOIN bids b
+    WHERE br.execution_layer_reward <= b.t        -- blocks I'd WIN at this bid
+)
+
+SELECT
+    date_trunc('day', block_time) AS day,
+    my_bid,
+    COUNT(*)                AS winnable_blocks,
+    MAX(gap_secs) / 60.0    AS max_wait_min,
+    MAX(gap_secs) / 3600.0  AS max_wait_hours
+FROM gaps
+GROUP BY 1, 2
+ORDER BY 1, 2

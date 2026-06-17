@@ -1,0 +1,15 @@
+# secrets — never commit the RPC token
+.env
+
+# OS / editor / build junk
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+
+# local-only reference material (not part of the app)
+Ethereum Block Subscription Service.pdf
+README (2).md
+STYLING.md
