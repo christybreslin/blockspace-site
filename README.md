@@ -46,11 +46,11 @@ The server (`server.py`):
 
 - **History** — `block_rewards_percentiles.csv` (daily p50/p80/p90/p99, in ETH) and
   `blockspace_max_wait.csv` (winnable blocks/day + worst-case wait per fixed bid). These
-  are exports of the two Dune queries in `dune-queries.txt`. They are a static snapshot;
-  refresh them by re-running those queries.
+  are exports of two Dune queries (a proposer-reward percentile query and a bid winnable/wait
+  query). They are a static snapshot; refresh them by re-running those queries.
 - **Live + lookup** — computed on demand from the RPC.
 
-**Reward definition** (ported from `dune-queries.txt`): priority-fee sum
+**Reward definition** (mirrors the Dune query logic): priority-fee sum
 `Σ(effectiveGasPrice − baseFee)·gasUsed` for vanilla blocks; the builder→proposer payment
 (final transaction value) for MEV-Boost blocks. The server returns both metrics per block.
 
@@ -70,7 +70,7 @@ server.py         RPC wrapper + static server (stdlib only)
 styles/fonts.css  @font-face declarations
 assets/           fonts + wordmark
 *.csv             Dune history exports
-dune-queries.txt  the SQL behind the CSVs
+AGENTS.md         how to maintain the styling system
 .env.example      copy to .env (gitignored)
 ```
 
