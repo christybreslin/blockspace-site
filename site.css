@@ -1251,3 +1251,9 @@ footer.site-foot .legal {
 
   .dashboard { padding-block: clamp(1.5rem, 5vw, 2.5rem); }
 }
+
+/* charts fill their card (so the responsive viewBox can measure real width) */
+.chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.cal-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.cal-scroll::-webkit-scrollbar { height: 6px; }
+.cal-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }

@@ -434,11 +434,21 @@ async function doLookup(idRaw) {
 // ============================================================
 //  SVG charts
 // ============================================================
+// Responsive viewBox width. Desktop keeps the fixed 1100 (unchanged look).
+// On mobile we render the viewBox at the card's real pixel width so SVG text
+// is drawn 1:1 (crisp) instead of being scaled down to ~3px.
+const isNarrow = () => typeof window !== "undefined" && window.innerWidth <= 820;
+function svgW(svg) {
+  if (!isNarrow()) return 1100;
+  const w = Math.round(svg.getBoundingClientRect().width);
+  return w > 60 ? w : 1100;   // fall back if the tab isn't laid out yet
+}
+
 function buildLineChart(svgId, opts) {
   const svg = document.getElementById(svgId);
   if (!svg) return;
   const { series, dates, log = false, yFmt = String, valFmt = String, areaKey = null, tooltipId = null } = opts;
-  const W = 1100, H = 360, m = { l: 64, r: 20, t: 18, b: 36 };
+  const W = svgW(svg), narrow = W < 560, H = narrow ? 300 : 360, m = { l: narrow ? 46 : 64, r: narrow ? 12 : 20, t: 18, b: 34 };
   const plotW = W - m.l - m.r, plotH = H - m.t - m.b, n = dates.length;
   const allVals = []; series.forEach(s => s.data.forEach(v => { if (v != null && isFinite(v)) allVals.push(v); }));
   let yMin = Math.min(...allVals), yMax = Math.max(...allVals), yOf, ticks;
@@ -456,7 +466,7 @@ function buildLineChart(svgId, opts) {
   const xOf = i => m.l + (n <= 1 ? 0 : (i / (n - 1)) * plotW);
 
   const grid = ticks.map(tv => { const y = yOf(tv); return `<line class="grid-line" x1="${m.l}" y1="${y.toFixed(1)}" x2="${m.l + plotW}" y2="${y.toFixed(1)}"/><text class="axis-label" x="${m.l - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end">${yFmt(tv)}</text>`; }).join("");
-  const xticks = []; for (let k = 0; k < 6; k++) xticks.push(Math.round(k * (n - 1) / 5));
+  const NT = narrow ? 4 : 6; const xticks = []; for (let k = 0; k < NT; k++) xticks.push(Math.round(k * (n - 1) / (NT - 1)));
   const xlab = xticks.map(i => `<text class="axis-label" x="${xOf(i).toFixed(1)}" y="${m.t + plotH + 22}" text-anchor="middle">${monthLabel(dates[i])}</text>`).join("");
 
   let area = "";
@@ -499,7 +509,7 @@ function attachLineHover(svg, c) {
 function buildBarChart(svgId, rows) {
   const svg = document.getElementById(svgId);
   if (!svg) return;
-  const W = 1100, rowH = 40, top = 8, labelW = 130, valW = 70, left = labelW + 16, right = W - valW - 16, barW = right - left;
+  const W = svgW(svg), narrow = W < 560, rowH = 40, top = 8, labelW = narrow ? 92 : 130, valW = narrow ? 78 : 70, left = labelW + 14, right = W - valW - 12, barW = right - left;
   const H = top + rows.length * rowH + 6;
   const maxFrac = Math.max(...rows.map(r => r.frac), 1e-9);
   const body = rows.map((r, i) => {
@@ -531,7 +541,7 @@ function buildFanChart(svgId, opts) {
   const svg = document.getElementById(svgId);
   if (!svg) return;
   const { dates, p50, p90, p99, log = true, yFmt = ethAxis, valFmt = v => ethF(v) + " ETH", tooltipId = null, titleSuffix = null } = opts;
-  const W = 1100, H = 360, m = { l: 64, r: 20, t: 18, b: 36 };
+  const W = svgW(svg), narrow = W < 560, H = narrow ? 300 : 360, m = { l: narrow ? 46 : 64, r: narrow ? 12 : 20, t: 18, b: 34 };
   const plotW = W - m.l - m.r, plotH = H - m.t - m.b, n = dates.length;
   const all = [...p50, ...p90, ...p99].filter(v => v != null && isFinite(v) && v > 0);
   let yMin = Math.min(...all), yMax = Math.max(...all), yOf, ticks;
@@ -544,7 +554,7 @@ function buildFanChart(svgId, opts) {
   }
   const xOf = i => m.l + (n <= 1 ? 0 : i / (n - 1) * plotW);
   const grid = ticks.map(tv => { const y = yOf(tv); return `<line class="grid-line" x1="${m.l}" y1="${y.toFixed(1)}" x2="${m.l + plotW}" y2="${y.toFixed(1)}"/><text class="axis-label" x="${m.l - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end">${yFmt(tv)}</text>`; }).join("");
-  const xt = []; for (let k = 0; k < 6; k++) xt.push(Math.round(k * (n - 1) / 5));
+  const NT = narrow ? 4 : 6; const xt = []; for (let k = 0; k < NT; k++) xt.push(Math.round(k * (n - 1) / (NT - 1)));
   const xlab = xt.map(i => `<text class="axis-label" x="${xOf(i).toFixed(1)}" y="${m.t + plotH + 22}" text-anchor="middle">${monthLabel(dates[i])}</text>`).join("");
   const band = (top, bot) => { let d = `M ${xOf(0).toFixed(1)} ${yOf(top[0]).toFixed(1)}`; for (let i = 1; i < n; i++) d += ` L ${xOf(i).toFixed(1)} ${yOf(top[i]).toFixed(1)}`; for (let i = n - 1; i >= 0; i--) d += ` L ${xOf(i).toFixed(1)} ${yOf(bot[i]).toFixed(1)}`; return d + " Z"; };
   const line = arr => { let d = ""; for (let i = 0; i < n; i++) { const v = arr[i]; if (v == null || !isFinite(v)) continue; d += (d === "" ? "M" : "L") + ` ${xOf(i).toFixed(1)} ${yOf(v).toFixed(1)} `; } return d; };
@@ -582,7 +592,7 @@ function buildBidTimeHeatmap(svgId, tooltipId) {
     share[ri][ci] = r.winnable_blocks / (blocksByDay.get(r.day) || 7150);
     wait[ri][ci] = r.max_wait_min;
   }
-  const W = 1100, m = { l: 72, r: 12, t: 8, b: 26 }, rowH = 24, plotW = W - m.l - m.r, cw = plotW / ncols;
+  const W = svgW(svg), narrow = W < 560, m = { l: narrow ? 54 : 72, r: 12, t: 8, b: 26 }, rowH = 24, plotW = W - m.l - m.r, cw = plotW / ncols;
   const H = m.t + nrows * rowH + m.b;
   const order = BID_LADDER.map((_, i) => i).reverse();   // highest bid on top
   let cells = "";
@@ -596,7 +606,7 @@ function buildBidTimeHeatmap(svgId, tooltipId) {
     cells += `<text class="heat-label ${sel ? "sel" : ""}" x="${m.l - 8}" y="${y + rowH / 2 + 3}" text-anchor="end">${ethF(BID_LADDER[ri])}</text>`;
     if (sel) cells += `<rect class="heat-sel" x="${m.l}" y="${y}" width="${plotW}" height="${rowH - 1}" />`;
   });
-  const xt = []; for (let k = 0; k < 6; k++) xt.push(Math.round(k * (ncols - 1) / 5));
+  const NT = narrow ? 4 : 6; const xt = []; for (let k = 0; k < NT; k++) xt.push(Math.round(k * (ncols - 1) / (NT - 1)));
   const xlab = xt.map(ci => `<text class="heat-label" x="${(m.l + ci * cw).toFixed(1)}" y="${m.t + nrows * rowH + 18}" text-anchor="middle">${monthLabel(days[ci].day)}</text>`).join("");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = cells + xlab + `<rect class="hit" x="${m.l}" y="${m.t}" width="${plotW}" height="${nrows * rowH}" fill="transparent"/>`;
@@ -625,7 +635,11 @@ function buildCalendarHeatmap(svgId, days, getVal, tooltipId) {
   const nWeeks = Math.max(...cells.map(c => c.week)) + 1;
   const vals = cells.map(c => c.v).filter(v => v != null && isFinite(v) && v > 0);
   const lo = Math.min(...vals), hi = Math.max(...vals);
-  const W = 1100, m = { l: 32, r: 10, t: 18, b: 6 }, gap = 2, cw = (W - m.l - m.r) / nWeeks, cell = Math.min(cw - gap, 15);
+  const narrow = isNarrow();
+  const m = { l: narrow ? 26 : 32, r: 10, t: 18, b: 6 }, gap = 2;
+  let W, cw, cell;
+  if (narrow) { cell = 9; cw = cell + gap; W = m.l + nWeeks * cw + m.r; }   // fixed cells → card scrolls
+  else { W = 1100; cw = (W - m.l - m.r) / nWeeks; cell = Math.min(cw - gap, 15); }
   const H = m.t + 7 * (cell + gap) + m.b;
   let rects = ""; const map = new Map();
   for (const c of cells) {
@@ -645,6 +659,9 @@ function buildCalendarHeatmap(svgId, days, getVal, tooltipId) {
   });
   const wl = [[1, "Mon"], [3, "Wed"], [5, "Fri"]].map(([wd, t]) => `<text class="heat-label" x="${m.l - 6}" y="${(m.t + wd * (cell + gap) + cell).toFixed(1)}" text-anchor="end">${t}</text>`).join("");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  // on mobile the calendar keeps readable cells and scrolls inside its (scrollable) card
+  svg.style.width = narrow ? W + "px" : "";
+  svg.style.maxWidth = narrow ? "none" : "";
   svg.innerHTML = rects + mlab + wl;
   if (tooltipId) {
     const tt = document.getElementById(tooltipId), host = svg.closest(".dash-card") || svg.closest(".chart-host");
@@ -663,7 +680,7 @@ function buildCalendarHeatmap(svgId, days, getVal, tooltipId) {
 function buildHistogram(svgId, values) {
   const svg = document.getElementById(svgId);
   if (!svg || !values.length) return;
-  const W = 1100, H = 300, m = { l: 48, r: 16, t: 14, b: 34 }, plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+  const W = svgW(svg), H = isNarrow() ? 240 : 300, m = { l: 42, r: 14, t: 14, b: 30 }, plotW = W - m.l - m.r, plotH = H - m.t - m.b;
   const pos = values.filter(v => v > 0);
   const lo = Math.min(...pos), hi = Math.max(...pos), Llo = Math.log10(lo), Lhi = Math.log10(hi) || Llo + 1;
   const NB = 16, bins = new Array(NB).fill(0);
@@ -697,9 +714,10 @@ let _lastStripBlock = 0;
 function buildLiveStrip(svgId) {
   const svg = document.getElementById(svgId);
   if (!svg || !STATE.live.length) return;
-  const N = 24;
+  const W = svgW(svg), narrow = W < 560;
+  const N = narrow ? 12 : 24;
   const arr = STATE.live.slice(0, N).slice().reverse();   // oldest → newest (left → right)
-  const W = 1100, H = 250, m = { l: 18, r: 18, t: 34, b: 40 }, plotW = W - m.l - m.r, plotH = H - m.t - m.b;
+  const H = narrow ? 210 : 250, m = { l: 16, r: 16, t: 30, b: 36 }, plotW = W - m.l - m.r, plotH = H - m.t - m.b;
   const { yOf } = logScaleY(arr.map(liveValue), m, plotH);
   const cw = plotW / N, gap = Math.min(7, cw * 0.22), baseY = m.t + plotH;
   const newestNum = STATE.live[0].block_number;
@@ -708,7 +726,10 @@ function buildLiveStrip(svgId) {
     const v = liveValue(b), x = m.l + i * cw + gap / 2, w = cw - gap, y = yOf(v), h = Math.max(3, baseY - y);
     const cx = x + w / 2, isNewest = b.block_number === newestNum;
     const cls = `strip-tile${isNewest ? " newest" : ""}${isNewest && arrived ? " arrived" : ""}`;
-    const fig = `<text class="strip-fig${isNewest ? " newest" : ""}" x="${cx.toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle">${ethFig(v)}</text>`;
+    // on narrow screens only label the newest tile (figures would collide otherwise)
+    const fig = (!narrow || isNewest)
+      ? `<text class="strip-fig${isNewest ? " newest" : ""}" x="${cx.toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle">${ethFig(v)}</text>`
+      : "";
     return `<rect class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="2"><title>#${b.block_number} · ${ethF(v)} ETH</title></rect>${fig}`;
   }).join("");
   _lastStripBlock = newestNum;
@@ -756,13 +777,22 @@ function wireLookup() {
   input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
 }
 const TABS = ["overview", "block-value", "bid-win", "live"];
+// re-render the visible tab's charts so they measure the now-laid-out width (mobile sizing)
+function renderActiveTab() {
+  if (!STATE.blockValueDaily.length) return;
+  const t = STATE.tab;
+  if (t === "overview") renderOverview();
+  else if (t === "block-value") renderBlockValue();
+  else if (t === "bid-win") renderBidWin();
+  else if (t === "live") renderLive();
+}
 function wireTabs() {
   const fromHash = () => { const h = (location.hash || "").replace(/^#/, ""); return TABS.includes(h) ? h : "overview"; };
   const apply = () => {
     const t = fromHash(); STATE.tab = t;
     document.querySelectorAll("[data-tab-content]").forEach(el => { el.hidden = el.dataset.tabContent !== t; });
     document.querySelectorAll("[data-tab-link]").forEach(a => a.classList.toggle("active", a.dataset.tabLink === t));
-    if (t === "live" && STATE.live.length) renderLive();
+    renderActiveTab();   // recompute charts at the now-visible width
     window.scrollTo(0, 0);
   };
   window.addEventListener("hashchange", apply);
@@ -779,6 +809,7 @@ async function boot() {
   wireTabs();
   wireMetric();
   wireLookup();
+  let _rz; window.addEventListener("resize", () => { clearTimeout(_rz); _rz = setTimeout(renderActiveTab, 200); });
   try {
     await loadAll();
     const last = STATE.blockValueDaily[STATE.blockValueDaily.length - 1];
