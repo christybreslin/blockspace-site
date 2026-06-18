@@ -598,6 +598,9 @@ section.frame.bg-dark .section-lede  { color: var(--on-dark-muted); }
 }
 .dash-kpi:hover { background: color-mix(in srgb, var(--brand-1) 50%, var(--bg-elev)); }
 .theme-dark .dash-kpi:hover { background: color-mix(in srgb, var(--brand-8) 25%, var(--bg-elev)); }
+/* clickable KPI (e.g. Hot days → #hot-days): same look, but a pointer + accent edge */
+a.dash-kpi.is-link { text-decoration: none; color: inherit; cursor: pointer; box-shadow: inset 0 -2px 0 var(--primary); }
+a.dash-kpi.is-link:hover .foot { color: var(--primary); }
 .dash-kpi .label {
   font-family: var(--mono);
   font-size: 9.5px;
@@ -967,6 +970,7 @@ section.frame.bg-dark .section-lede  { color: var(--on-dark-muted); }
   color: var(--text-muted);
   font-feature-settings: "tnum";
 }
+.mono-stamp.stale { color: var(--warn); }
 
 /* ============================================================
    Bid selector (Bid & Win tab)

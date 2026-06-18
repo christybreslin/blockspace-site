@@ -30,6 +30,7 @@ const STATE = {
   bwSortKey: "my_bid", bwSortDir: "asc",
   gas: null,                // latest /api/gas (Search tab)
   mempool: null,            // latest /api/mempool (Search tab)
+  health: null,             // /api/health (version, data_through, refreshed_at)
 };
 
 // ----- math / format ----------------------------------------
@@ -207,8 +208,10 @@ function renderOverview() {
   const dP90 = (latest.p90 - ago30.p90) / ago30.p90;
   const winAvgP90 = avg(days.map(d => d.p90));
 
-  document.getElementById("hero-stamp").innerHTML =
-    `<span class="mono">${dateShort(latest.day)}</span> · latest day · window <span class="mono">${STATE.window}</span> · <span class="mono">${days.length}</span> days`;
+  const heroStamp = document.getElementById("hero-stamp");
+  heroStamp.innerHTML =
+    `<span class="mono">${dateShort(latest.day)}</span> · latest day · window <span class="mono">${STATE.window}</span> · <span class="mono">${days.length}</span> days${refreshStamp()}`;
+  heroStamp.classList.toggle("stale", dataIsStale());
 
   // Pooled / windowed figures. Prefer the server's true pooled percentiles
   // (90th pct of every block in the window); fall back to an average of daily
@@ -234,7 +237,7 @@ function renderOverview() {
     { label: "Tail · p99", value: ethF(latest.p99), foot: `${(latest.p99 / latest.p50).toFixed(0)}× median`, cls: "neutral" },
     { label: "Blocks / day", value: numF(latest.blocks), foot: "latest · ~12s cadence", cls: "neutral" },
     { label: "Regime", value: latest.p90 >= winAvgP90 ? "Hot" : "Quiet", foot: `vs ${STATE.window} p90`, cls: latest.p90 >= winAvgP90 ? "neg" : "" },
-    { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · 1.5× pooled`, cls: hotDays > 0 ? "neg" : "neutral" },
+    { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · list all →`, cls: hotDays > 0 ? "neg" : "neutral", href: "#hot-days" },
     // Row 2 — p90 by lookback + pooled medians
     { label: "p90 · 7d", value: ethF(p90_7d), foot: "trailing week", cls: "neutral" },
     { label: "p90 · 30d", value: ethF(p90_30d), foot: "trailing month", cls: "neutral" },
@@ -243,18 +246,52 @@ function renderOverview() {
     { label: "Median · all", value: ethF(p50_all), foot: blkFoot, cls: "neutral" },
     { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
   ];
-  document.getElementById("hero-kpis").innerHTML = tiles.map(t => `
-    <div class="dash-kpi" data-pulse>
+  document.getElementById("hero-kpis").innerHTML = tiles.map(t => {
+    const inner = `
       <div class="label">${t.label}</div>
       <div class="value">${t.value}</div>
-      <div class="foot ${t.cls}">${t.foot}</div>
-    </div>`).join("");
+      <div class="foot ${t.cls}">${t.foot}</div>`;
+    return t.href
+      ? `<a class="dash-kpi is-link" href="${t.href}" data-pulse>${inner}</a>`
+      : `<div class="dash-kpi" data-pulse>${inner}</div>`;
+  }).join("");
 
   buildFanChart("ov-fan", {
     dates: days.map(d => d.day), p50: days.map(d => d.p50), p90: days.map(d => d.p90), p99: days.map(d => d.p99),
     log: true, tooltipId: "ov-fan-tt",
   });
   buildCalendarHeatmap("ov-cal", days, d => d.p90, "ov-cal-tt");
+}
+
+// ----- Hot days (drill-down from the Overview KPI) ----------
+// Every day whose daily p90 cleared the hot threshold (1.5× the pooled p90),
+// hottest first. All-time, independent of the window switch — same basis as the
+// "Hot days" KPI tile.
+function renderHotDays() {
+  const bv = STATE.blockValueDaily;
+  if (!bv.length) return;
+  const P = STATE.pooled || {};
+  const pooledP90 = isFinite(P.p90) ? P.p90 : avg(bv.map(d => d.p90));
+  const thresh = isFinite(P.hot_threshold) ? P.hot_threshold : 1.5 * pooledP90;
+  const hot = bv.filter(d => d.p90 >= thresh).sort((a, b) => b.p90 - a.p90);
+
+  document.getElementById("hot-deck").innerHTML =
+    `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(bv.length)}</span> days · ` +
+    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× pooled <span class="mono">${ethF(pooledP90)}</span>)`;
+
+  const head = `<thead><tr>
+    <th>Day</th><th>p90 · ETH</th><th>× pooled</th><th>p50 · ETH</th><th>p99 · ETH</th><th>Blocks</th>
+  </tr></thead>`;
+  const body = hot.map(d => `<tr>
+    <td>${dateShort(d.day)}</td>
+    <td class="accent">${ethF(d.p90)}</td>
+    <td>${(d.p90 / pooledP90).toFixed(1)}×</td>
+    <td>${ethF(d.p50)}</td>
+    <td>${ethF(d.p99)}</td>
+    <td>${numF(d.blocks)}</td>
+  </tr>`).join("");
+  document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
+    `<tr><td colspan="6">No hot days in range.</td></tr>`}</tbody>`;
 }
 
 // ----- Block value (Q1) -------------------------------------
@@ -962,12 +999,13 @@ function wireSearch() {
   input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
 }
 let searchFeed = null;   // assigned in boot; polled immediately on entering the Search tab
-const TABS = ["overview", "block-value", "bid-win", "live", "search"];
+const TABS = ["overview", "hot-days", "block-value", "bid-win", "live", "search"];
 // re-render the visible tab's charts so they measure the now-laid-out width (mobile sizing)
 function renderActiveTab() {
   if (!STATE.blockValueDaily.length) return;
   const t = STATE.tab;
   if (t === "overview") renderOverview();
+  else if (t === "hot-days") renderHotDays();
   else if (t === "block-value") renderBlockValue();
   else if (t === "bid-win") renderBidWin();
   else if (t === "live") renderLive();
@@ -987,23 +1025,40 @@ function wireTabs() {
   apply();
 }
 
-// Footer build stamp: running code version + data freshness, from /api/health.
-// Turns amber (.stale) if the newest data day is more than 2 days behind today.
-async function renderBuildStamp() {
+// /api/health → STATE.health (version, data_through, refreshed_at). The refresh
+// time is shown in the Overview header (renderOverview); the footer keeps the
+// running code version + data-through.
+async function loadHealth() {
+  try { STATE.health = await fetch("/api/health").then(r => r.json()); }
+  catch (e) { STATE.health = null; }
+}
+
+// "refreshed <ts>" suffix for the Overview header, from the last build_history run.
+function refreshStamp() {
+  const h = STATE.health;
+  if (!h || !h.refreshed_at) return "";
+  const ts = new Date(h.refreshed_at * 1000).toISOString().slice(0, 16).replace("T", " ");
+  return ` · refreshed <span class="mono">${ts}Z</span>`;
+}
+
+// True when the newest data day is more than 2 days behind today (drives the amber stamp).
+function dataIsStale() {
+  const h = STATE.health;
+  if (!h || !h.data_through) return false;
+  return (Date.now() / 1000 - Date.parse(h.data_through + "T00:00:00Z") / 1000) / 86400 > 2;
+}
+
+// Footer build stamp: running code version + data-through (refresh time now lives
+// in the Overview header). Turns amber if the data is more than 2 days behind.
+function renderBuildStamp() {
   const el = document.getElementById("build-stamp");
-  if (!el) return;
-  try {
-    const h = await fetch("/api/health").then(r => r.json());
-    let txt = `v ${h.version || "?"}`;
-    if (h.commit_date) txt += ` · ${h.commit_date}`;
-    if (h.data_through) txt += ` · data ${h.data_through}`;
-    if (h.refreshed_at) txt += ` · refreshed ${new Date(h.refreshed_at * 1000).toISOString().slice(0, 16).replace("T", " ")}Z`;
-    el.textContent = txt;
-    if (h.data_through) {
-      const ageDays = (Date.now() / 1000 - Date.parse(h.data_through + "T00:00:00Z") / 1000) / 86400;
-      el.classList.toggle("stale", ageDays > 2);
-    }
-  } catch (e) { /* leave blank if health is unavailable */ }
+  const h = STATE.health;
+  if (!el || !h) return;
+  let txt = `v ${h.version || "?"}`;
+  if (h.commit_date) txt += ` · ${h.commit_date}`;
+  if (h.data_through) txt += ` · data ${h.data_through}`;
+  el.textContent = txt;
+  el.classList.toggle("stale", dataIsStale());
 }
 
 // ============================================================
@@ -1019,7 +1074,7 @@ async function boot() {
   wireSearch();
   let _rz; window.addEventListener("resize", () => { clearTimeout(_rz); _rz = setTimeout(renderActiveTab, 200); });
   try {
-    await loadAll();
+    await Promise.all([loadAll(), loadHealth()]);
     const last = STATE.blockValueDaily[STATE.blockValueDaily.length - 1];
     document.querySelectorAll(".pulled-stamp").forEach(el => el.textContent = last ? dateShort(last.day) : "—");
     renderBidLadder();
