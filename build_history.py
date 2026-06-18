@@ -26,7 +26,7 @@ import sys
 import json
 import sqlite3
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 
@@ -39,6 +39,9 @@ def main():
     ap = argparse.ArgumentParser(description="Build history CSV from the block cache.")
     ap.add_argument("--min-blocks", type=int, default=7000,
                     help="Minimum blocks for a day to be written (default 7000).")
+    ap.add_argument("--report-gaps", action="store_true",
+                    help="List interior days that are missing or short of --min-blocks "
+                         "(these show as empty cells in the Overview calendar).")
     ap.add_argument("--out", default=OUT_CSV, help="Output CSV path.")
     args = ap.parse_args()
 
@@ -192,6 +195,33 @@ def main():
               f"({rows[0][0]} → {rows[-1][0]}) to DB tables + CSVs")
     else:
         print("No complete days found — cache may be empty or below --min-blocks.")
+
+    # Interior coverage report: any calendar day inside the written span that did
+    # NOT get a row — either no blocks censused (a true gap) or fewer than
+    # --min-blocks (an incomplete day). These are exactly the empty cells in the
+    # Overview calendar, so this surfaces them at build time instead of by eye.
+    if args.report_gaps and rows:
+        first = datetime.strptime(rows[0][0], "%Y-%m-%d").date()
+        last = datetime.strptime(rows[-1][0], "%Y-%m-%d").date()
+        gaps = []
+        d = first
+        while d <= last:
+            key = d.strftime("%Y-%m-%d")
+            got = len(days.get(key, []))
+            if got < args.min_blocks:
+                gaps.append((key, "missing — no blocks censused" if got == 0
+                             else f"short — {got:,} blocks < {args.min_blocks:,}"))
+            d += timedelta(days=1)
+        if gaps:
+            print(f"\n⚠ {len(gaps)} interior day(s) missing or short "
+                  f"({first} → {last}) — empty on the Overview calendar:")
+            for day, why in gaps:
+                print(f"    {day}  {why}")
+            print("  Backfill with: executionRewards.py --start <day> --end <next-day> "
+                  "--complete  (then re-run build_history.py)")
+        else:
+            print(f"\n✓ No interior gaps: {first} → {last} is complete "
+                  f"(every day ≥ {args.min_blocks:,} blocks).")
 
 
 if __name__ == "__main__":
