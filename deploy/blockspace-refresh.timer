@@ -1,8 +1,8 @@
 [Unit]
-Description=Run the blockspace refresh hourly
+Description=Run the blockspace refresh every 3 hours
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* 00/3:00:00
 RandomizedDelaySec=120
 Persistent=true
 
