@@ -11,6 +11,10 @@ Endpoints:
   GET /api/head                -> {head}
   GET /api/block/<id>          -> computed block (<id> = number | 0xhash | latest)
   GET /api/live/recent?n=120   -> in-memory rolling window, newest first
+  GET /api/tx/<hash>           -> tx + receipt: priority fee paid, status, block/index
+  GET /api/gas                 -> base-fee + priority-fee percentiles, spot prices, tips
+  GET /api/mempool             -> txpool counts (if exposed) + pending-block preview
+  GET /api/address/<addr>      -> balance, nonce, contract-or-EOA (point lookup, no history)
 
 Reward (ported from dune-queries.txt CASE — both metrics returned):
   fees = Σ (effectiveGasPrice - baseFee) * gasUsed / 1e18          # priority-fee sum
@@ -319,6 +323,128 @@ def _safe(fn, *a):
         print("compute error:", e)
         return None
 
+# ---- search: tx / gas / mempool / address (read-only, point lookups) ----
+_ttl = {}                 # key -> (expires_at, value)
+_ttl_lock = threading.Lock()
+
+def _ttl_get(key):
+    with _ttl_lock:
+        e = _ttl.get(key)
+        if e and e[0] > time.time():
+            return e[1]
+    return None
+
+def _ttl_put(key, value, secs=4):
+    with _ttl_lock:
+        _ttl[key] = (time.time() + secs, value)
+
+def _gwei(wei):
+    return round(_hexint(wei) / 1e9, 3)
+
+def _is_hash(s):
+    return len(s) == 66 and s.startswith("0x")
+
+def _is_addr(s):
+    return len(s) == 42 and s.startswith("0x")
+
+def tx_detail(h):
+    """Tx + receipt + the block's base fee → effective priority fee paid (ETH)."""
+    tx = rpc("eth_getTransactionByHash", [h])
+    if not tx:
+        return None
+    rcpt = rpc("eth_getTransactionReceipt", [h])
+    pending = tx.get("blockNumber") is None
+    base = 0
+    if not pending:
+        blk = rpc("eth_getBlockByNumber", [tx["blockNumber"], False])
+        base = _hexint(blk.get("baseFeePerGas")) if blk else 0
+    eff = _hexint((rcpt or {}).get("effectiveGasPrice")) if rcpt else _hexint(tx.get("gasPrice"))
+    gas_used = _hexint((rcpt or {}).get("gasUsed")) if rcpt else 0
+    prio_fee = (eff - base) * gas_used / 1e18 if (not pending and rcpt) else None
+    status_hex = (rcpt or {}).get("status") if rcpt else None
+    status = _hexint(status_hex) if status_hex is not None else None
+    return {
+        "hash": tx.get("hash"),
+        "from": tx.get("from"),
+        "to": tx.get("to"),
+        "value_eth": _hexint(tx.get("value")) / 1e18,
+        "nonce": _hexint(tx.get("nonce")),
+        "type": _hexint(tx.get("type")),
+        "status": status,
+        "block_number": _hexint(tx.get("blockNumber")) if not pending else None,
+        "tx_index": _hexint(tx.get("transactionIndex")) if not pending else None,
+        "gas_used": gas_used,
+        "effective_gas_price_gwei": round(eff / 1e9, 3),
+        "base_fee_gwei": round(base / 1e9, 3),
+        "priority_fee_eth": prio_fee,
+        "pending": pending,
+    }
+
+def gas_oracle():
+    """Recent base-fee + priority-fee percentiles + spot prices + recommended tips."""
+    hit = _ttl_get("gas")
+    if hit is not None:
+        return hit
+    fh = rpc("eth_feeHistory", [hex(30), "latest", [10, 50, 90]]) or {}
+    base = [round(_hexint(x) / 1e9, 3) for x in fh.get("baseFeePerGas", [])]
+    rewards = fh.get("reward", []) or []
+    p10 = [round(_hexint(r[0]) / 1e9, 3) for r in rewards]
+    p50 = [round(_hexint(r[1]) / 1e9, 3) for r in rewards]
+    p90 = [round(_hexint(r[2]) / 1e9, 3) for r in rewards]
+    # feeHistory returns N+1 base fees: the last is the *next* block's base fee.
+    next_base = base[-1] if base else None
+    base_series = base[:-1] if len(base) > 1 else base
+    recent = lambda s: round(sum(s[-5:]) / len(s[-5:]), 3) if s else 0.0
+    val = {
+        "base_fee_series": base_series,
+        "prio_p10": p10, "prio_p50": p50, "prio_p90": p90,
+        "next_base_fee_gwei": next_base,
+        "gas_price_gwei": _gwei(rpc("eth_gasPrice", [])),
+        "max_priority_gwei": _gwei(rpc("eth_maxPriorityFeePerGas", [])),
+        "tip_standard_gwei": recent(p50),
+        "tip_fast_gwei": recent(p90),
+        "oldest_block": _hexint(fh.get("oldestBlock")),
+    }
+    _ttl_put("gas", val)
+    return val
+
+def mempool_status():
+    """txpool counts (if exposed) + a preview of the pending block."""
+    hit = _ttl_get("mempool")
+    if hit is not None:
+        return hit
+    pending_count = queued_count = None
+    try:
+        st = rpc("txpool_status", [])
+        pending_count = _hexint(st.get("pending"))
+        queued_count = _hexint(st.get("queued"))
+    except Exception:
+        pass  # endpoint may not expose txpool_* — degrade to the pending-block preview
+    pb = None
+    blk = _safe(rpc, "eth_getBlockByNumber", ["pending", False])
+    if blk:
+        pb = {
+            "num_tx": len(blk.get("transactions", [])),
+            "gas_used": _hexint(blk.get("gasUsed")),
+            "gas_limit": _hexint(blk.get("gasLimit")),
+            "base_fee_gwei": _gwei(blk.get("baseFeePerGas")),
+        }
+    val = {"pending_count": pending_count, "queued_count": queued_count, "pending_block": pb}
+    _ttl_put("mempool", val)
+    return val
+
+def address_detail(a):
+    """Point lookups only: balance, nonce, contract-or-EOA. No tx history (no DB)."""
+    bal = _hexint(rpc("eth_getBalance", [a, "latest"]))
+    nonce = _hexint(rpc("eth_getTransactionCount", [a, "latest"]))
+    code = rpc("eth_getCode", [a, "latest"]) or "0x"
+    return {
+        "address": a,
+        "balance_eth": bal / 1e18,
+        "nonce": nonce,
+        "is_contract": len(code) > 2,
+    }
+
 # ---- HTTP ---------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
@@ -376,6 +502,23 @@ class Handler(SimpleHTTPRequestHandler):
                 if not val:
                     return self._json({"error": "not found"}, 404)
                 return self._json(val)
+            if path.startswith("/api/tx/"):
+                h = path[len("/api/tx/"):]
+                if not _is_hash(h):
+                    return self._json({"error": "bad tx hash"}, 404)
+                val = tx_detail(h)
+                if not val:
+                    return self._json({"error": "not found"}, 404)
+                return self._json(val)
+            if path == "/api/gas":
+                return self._json(gas_oracle())
+            if path == "/api/mempool":
+                return self._json(mempool_status())
+            if path.startswith("/api/address/"):
+                a = path[len("/api/address/"):]
+                if not _is_addr(a):
+                    return self._json({"error": "bad address"}, 404)
+                return self._json(address_detail(a))
             return self._json({"error": "unknown endpoint"}, 404)
         except Exception as e:
             return self._json({"error": str(e)}, 502)

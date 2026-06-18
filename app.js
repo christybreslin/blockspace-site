@@ -28,6 +28,8 @@ const STATE = {
   metric: "take",           // "take" (proposer/Dune CASE) | "fees" (priority-fee sum)
   bvSortKey: "day",  bvSortDir: "desc", bvSearch: "",
   bwSortKey: "my_bid", bwSortDir: "asc",
+  gas: null,                // latest /api/gas (Search tab)
+  mempool: null,            // latest /api/mempool (Search tab)
 };
 
 // ----- math / format ----------------------------------------
@@ -428,6 +430,31 @@ function renderLive() {
 }
 
 // ----- Block lookup -----------------------------------------
+// Shared card markup: a kicker + identifier head, then a list of metric rows.
+function lookupCardHTML(kicker, ident, rows) {
+  return `
+      <div class="lookup-card">
+        <div class="lookup-head">
+          <span class="kicker">${kicker}</span>
+          <span class="lookup-num mono">${ident}</span>
+        </div>
+        <div class="lookup-metrics">
+          ${rows.map(([k, v, acc]) => `<div class="tier-metric"><span class="k">${k}</span><span class="v ${acc ? "accent" : ""}">${v}</span></div>`).join("")}
+        </div>
+      </div>`;
+}
+function blockCardHTML(b) {
+  const rows = [
+    ["Proposer take", ethF(b.reward_take) + " ETH", b.branch === "mev"],
+    ["Priority fees", ethF(b.reward_fees) + " ETH", b.branch === "fees"],
+    ["Builder", escapeHtml(b.builder), false],
+    ["Branch", b.branch === "mev" ? "MEV-Boost payment" : "priority-fee sum", false],
+    ["Transactions", numF(b.num_tx), false],
+    ["Base fee", b.base_fee_gwei.toFixed(3) + " gwei", false],
+    ["Time", new Date(b.time).toLocaleString(), false],
+  ];
+  return lookupCardHTML("Block", `#${b.block_number.toLocaleString()}`, rows);
+}
 async function doLookup(idRaw) {
   const id = idRaw.trim();
   const host = document.getElementById("lookup-result");
@@ -437,28 +464,128 @@ async function doLookup(idRaw) {
     const res = await fetch(`/api/block/${encodeURIComponent(id)}`);
     const b = await res.json();
     if (!res.ok || b.error) { host.innerHTML = `<p class="dash-card-foot">Not found: <span class="mono">${escapeHtml(id)}</span></p>`; return; }
-    const rows = [
-      ["Proposer take", ethF(b.reward_take) + " ETH", b.branch === "mev"],
-      ["Priority fees", ethF(b.reward_fees) + " ETH", b.branch === "fees"],
-      ["Builder", escapeHtml(b.builder), false],
-      ["Branch", b.branch === "mev" ? "MEV-Boost payment" : "priority-fee sum", false],
-      ["Transactions", numF(b.num_tx), false],
-      ["Base fee", b.base_fee_gwei.toFixed(3) + " gwei", false],
-      ["Time", new Date(b.time).toLocaleString(), false],
-    ];
-    host.innerHTML = `
-      <div class="lookup-card">
-        <div class="lookup-head">
-          <span class="kicker">Block</span>
-          <span class="lookup-num mono">#${b.block_number.toLocaleString()}</span>
-        </div>
-        <div class="lookup-metrics">
-          ${rows.map(([k, v, acc]) => `<div class="tier-metric"><span class="k">${k}</span><span class="v ${acc ? "accent" : ""}">${v}</span></div>`).join("")}
-        </div>
-      </div>`;
+    host.innerHTML = blockCardHTML(b);
   } catch (e) {
     host.innerHTML = `<p class="dash-card-foot">Lookup failed: ${escapeHtml(String(e.message || e))}</p>`;
   }
+}
+
+// ----- Search tab: smart lookup + gas oracle + mempool ------
+const gweiF = v => v == null ? "—" : (v >= 100 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toFixed(3));
+const hexV = s => `<span class="mono hex">${escapeHtml(s)}</span>`;   // full, never shortened
+
+function txCardHTML(t) {
+  const status = t.pending ? "pending" : t.status === 1 ? "success" : t.status === 0 ? "failed" : "—";
+  const rows = [
+    ["Status", status, t.status === 0],
+    ["From", hexV(t.from), false],
+    ["To", t.to ? hexV(t.to) : "contract creation", false],
+    ["Value", ethF(t.value_eth) + " ETH", false],
+    ["Priority fee paid", t.priority_fee_eth == null ? "—" : ethF(t.priority_fee_eth) + " ETH", true],
+    ["Gas used", numF(t.gas_used), false],
+    ["Effective gas price", gweiF(t.effective_gas_price_gwei) + " gwei", false],
+    ["Base fee", gweiF(t.base_fee_gwei) + " gwei", false],
+    ["Nonce", numF(t.nonce), false],
+    ["Block", t.block_number == null ? "pending" : `#${t.block_number.toLocaleString()} · idx ${t.tx_index}`, false],
+  ];
+  return lookupCardHTML("Transaction", `<span class="hex">${escapeHtml(t.hash)}</span>`, rows);
+}
+function addrCardHTML(a) {
+  const rows = [
+    ["Type", a.is_contract ? "Contract" : "EOA · wallet", a.is_contract],
+    ["Balance", ethF(a.balance_eth) + " ETH", false],
+    ["Nonce · tx sent", numF(a.nonce), false],
+  ];
+  return lookupCardHTML("Address", `<span class="hex">${escapeHtml(a.address)}</span>`, rows);
+}
+async function doSearch(raw) {
+  const q = raw.trim();
+  const host = document.getElementById("search-result");
+  if (!host) return;
+  if (!q) { host.innerHTML = ""; return; }
+  host.innerHTML = `<p class="dash-card-foot">Searching <span class="mono">${escapeHtml(q)}</span>…</p>`;
+  const fail = msg => { host.innerHTML = `<p class="dash-card-foot">${msg}</p>`; };
+  try {
+    if (/^0x[0-9a-fA-F]{40}$/.test(q)) {                 // address
+      const res = await fetch(`/api/address/${q}`);
+      const a = await res.json();
+      if (!res.ok || a.error) return fail(`Address not found: <span class="mono">${escapeHtml(q)}</span>`);
+      host.innerHTML = addrCardHTML(a);
+    } else if (/^0x[0-9a-fA-F]{64}$/.test(q)) {          // tx hash → fall back to block-by-hash
+      let res = await fetch(`/api/tx/${q}`);
+      let d = await res.json();
+      if (res.ok && !d.error) { host.innerHTML = txCardHTML(d); return; }
+      res = await fetch(`/api/block/${q}`);
+      d = await res.json();
+      if (res.ok && !d.error) { host.innerHTML = blockCardHTML(d); return; }
+      return fail(`No tx or block for <span class="mono">${escapeHtml(q)}</span>`);
+    } else if (/^\d+$/.test(q) || q.toLowerCase() === "latest") {   // block number / latest
+      const res = await fetch(`/api/block/${encodeURIComponent(q)}`);
+      const b = await res.json();
+      if (!res.ok || b.error) return fail(`Block not found: <span class="mono">${escapeHtml(q)}</span>`);
+      host.innerHTML = blockCardHTML(b);
+    } else {
+      return fail(`Unrecognized — enter a block number, a 0x tx hash (66), a 0x address (42), or "latest".`);
+    }
+  } catch (e) {
+    fail(`Search failed: ${escapeHtml(String(e.message || e))}`);
+  }
+}
+function renderGasOracle() {
+  const g = STATE.gas, khost = document.getElementById("search-gas-kpis");
+  if (!g || !khost) return;
+  const tiles = [
+    { label: "Next base fee", value: gweiF(g.next_base_fee_gwei), foot: "gwei · next block", cls: "neutral" },
+    { label: "Tip · standard", value: gweiF(g.tip_standard_gwei), foot: "gwei · ~p50 recent", cls: "neutral" },
+    { label: "Tip · fast", value: gweiF(g.tip_fast_gwei), foot: "gwei · ~p90 recent", cls: "neg" },
+    { label: "Gas price · spot", value: gweiF(g.gas_price_gwei), foot: `tip ${gweiF(g.max_priority_gwei)} gwei`, cls: "neutral" },
+  ];
+  khost.innerHTML = tiles.map(t => `
+    <div class="dash-kpi" data-pulse><div class="label">${t.label}</div><div class="value">${t.value}</div><div class="foot ${t.cls}">${t.foot}</div></div>`).join("");
+  const base = g.base_fee_series || [];
+  if (!base.length) return;
+  const oldest = g.oldest_block || 0;
+  const blocks = base.map((_, i) => String(oldest + i));
+  buildLineChart("search-gas-chart", {
+    dates: blocks,
+    series: [
+      { key: "base", cls: "p99", label: "base fee", data: base },
+      { key: "p50", cls: "p50", label: "priority p50", data: g.prio_p50 || [] },
+      { key: "p90", cls: "p90", label: "priority p90", data: g.prio_p90 || [] },
+    ],
+    yFmt: gweiF, valFmt: v => gweiF(v) + " gwei", tooltipId: "search-gas-tt",
+    xFmt: b => "#" + b, xLabel: b => "Block #" + Number(b).toLocaleString(),
+  });
+}
+function renderMempool() {
+  const m = STATE.mempool, host = document.getElementById("search-mempool-kpis");
+  if (!m || !host) return;
+  const pb = m.pending_block || {};
+  const pct = pb.gas_limit ? (pb.gas_used / pb.gas_limit * 100) : null;
+  const tiles = [
+    { label: "Mempool · pending", value: m.pending_count == null ? "—" : numF(m.pending_count), foot: "txs awaiting inclusion", cls: "neutral" },
+    { label: "Mempool · queued", value: m.queued_count == null ? "—" : numF(m.queued_count), foot: "not yet executable", cls: "neutral" },
+    { label: "Pending block · txs", value: pb.num_tx == null ? "—" : numF(pb.num_tx), foot: pct == null ? "next block preview" : `${pct.toFixed(0)}% gas used`, cls: "neutral" },
+    { label: "Pending base fee", value: gweiF(pb.base_fee_gwei), foot: "gwei · next block", cls: "neutral" },
+  ];
+  host.innerHTML = tiles.map(t => `
+    <div class="dash-kpi" data-pulse><div class="label">${t.label}</div><div class="value">${t.value}</div><div class="foot ${t.cls}">${t.foot}</div></div>`).join("");
+}
+function renderSearch() { renderGasOracle(); renderMempool(); }
+
+// Polls the gas oracle + mempool while the Search tab is active (no RPC load off-tab).
+class SearchFeed {
+  constructor(onUpdate) { this.onUpdate = onUpdate; this.timer = null; }
+  async poll() {
+    if (STATE.tab !== "search") return;
+    try {
+      const [gr, mr] = await Promise.all([fetch("/api/gas"), fetch("/api/mempool")]);
+      if (gr.ok) { const g = await gr.json(); if (!g.error) STATE.gas = g; }
+      if (mr.ok) { const m = await mr.json(); if (!m.error) STATE.mempool = m; }
+      this.onUpdate();
+    } catch { /* transient — keep last */ }
+  }
+  start() { this.timer = setInterval(() => this.poll(), 5000); }
 }
 
 // ============================================================
@@ -477,7 +604,7 @@ function svgW(svg) {
 function buildLineChart(svgId, opts) {
   const svg = document.getElementById(svgId);
   if (!svg) return;
-  const { series, dates, log = false, yFmt = String, valFmt = String, areaKey = null, tooltipId = null } = opts;
+  const { series, dates, log = false, yFmt = String, valFmt = String, areaKey = null, tooltipId = null, xFmt = monthLabel, xLabel = dateShort } = opts;
   const W = svgW(svg), narrow = W < 560, H = narrow ? 300 : 360, m = { l: narrow ? 46 : 64, r: narrow ? 12 : 20, t: 18, b: 34 };
   const plotW = W - m.l - m.r, plotH = H - m.t - m.b, n = dates.length;
   const allVals = []; series.forEach(s => s.data.forEach(v => { if (v != null && isFinite(v)) allVals.push(v); }));
@@ -497,7 +624,7 @@ function buildLineChart(svgId, opts) {
 
   const grid = ticks.map(tv => { const y = yOf(tv); return `<line class="grid-line" x1="${m.l}" y1="${y.toFixed(1)}" x2="${m.l + plotW}" y2="${y.toFixed(1)}"/><text class="axis-label" x="${m.l - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end">${yFmt(tv)}</text>`; }).join("");
   const NT = narrow ? 4 : 6; const xticks = []; for (let k = 0; k < NT; k++) xticks.push(Math.round(k * (n - 1) / (NT - 1)));
-  const xlab = xticks.map(i => `<text class="axis-label" x="${xOf(i).toFixed(1)}" y="${m.t + plotH + 22}" text-anchor="middle">${monthLabel(dates[i])}</text>`).join("");
+  const xlab = xticks.map(i => `<text class="axis-label" x="${xOf(i).toFixed(1)}" y="${m.t + plotH + 22}" text-anchor="middle">${xFmt(dates[i])}</text>`).join("");
 
   let area = "";
   if (areaKey) {
@@ -509,7 +636,7 @@ function buildLineChart(svgId, opts) {
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `${grid}${xlab}<line class="axis-line" x1="${m.l}" y1="${m.t}" x2="${m.l}" y2="${m.t + plotH}"/><line class="axis-line" x1="${m.l}" y1="${m.t + plotH}" x2="${m.l + plotW}" y2="${m.t + plotH}"/>${area}${lines}<line class="marker-rule" x1="0" y1="${m.t}" x2="0" y2="${m.t + plotH}" style="opacity:0"/><rect class="hit" x="${m.l}" y="${m.t}" width="${plotW}" height="${plotH}" fill="transparent"/>`;
 
-  if (tooltipId) attachLineHover(svg, { series, dates, xOf, n, m, plotW, tooltipId, valFmt });
+  if (tooltipId) attachLineHover(svg, { series, dates, xOf, n, m, plotW, tooltipId, valFmt, xLabel });
 }
 
 function attachLineHover(svg, c) {
@@ -526,7 +653,7 @@ function attachLineHover(svg, c) {
     const x = c.xOf(idx);
     rule.setAttribute("x1", x); rule.setAttribute("x2", x); rule.style.opacity = "1";
     const rows = c.series.map(s => `<span class="tt-row"><span class="k">${s.label}</span> ${s.data[idx] == null ? "—" : c.valFmt(s.data[idx])}</span>`).join("<br/>");
-    const title = dateShort(c.dates[idx]) + (c.titleSuffix ? ` · ${c.titleSuffix}` : "");
+    const title = (c.xLabel || dateShort)(c.dates[idx]) + (c.titleSuffix ? ` · ${c.titleSuffix}` : "");
     tt.innerHTML = `<span class="tt-title">${title}</span>${rows}`;
     const hr = host.getBoundingClientRect();
     tt.style.left = (e.clientX - hr.left) + "px";
@@ -806,7 +933,15 @@ function wireLookup() {
   document.getElementById("lookup-btn")?.addEventListener("click", go);
   input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
 }
-const TABS = ["overview", "block-value", "bid-win", "live"];
+function wireSearch() {
+  const input = document.getElementById("search-input");
+  if (!input) return;
+  const go = () => doSearch(input.value);
+  document.getElementById("search-btn")?.addEventListener("click", go);
+  input.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+}
+let searchFeed = null;   // assigned in boot; polled immediately on entering the Search tab
+const TABS = ["overview", "block-value", "bid-win", "live", "search"];
 // re-render the visible tab's charts so they measure the now-laid-out width (mobile sizing)
 function renderActiveTab() {
   if (!STATE.blockValueDaily.length) return;
@@ -815,6 +950,7 @@ function renderActiveTab() {
   else if (t === "block-value") renderBlockValue();
   else if (t === "bid-win") renderBidWin();
   else if (t === "live") renderLive();
+  else if (t === "search") renderSearch();
 }
 function wireTabs() {
   const fromHash = () => { const h = (location.hash || "").replace(/^#/, ""); return TABS.includes(h) ? h : "overview"; };
@@ -823,6 +959,7 @@ function wireTabs() {
     document.querySelectorAll("[data-tab-content]").forEach(el => { el.hidden = el.dataset.tabContent !== t; });
     document.querySelectorAll("[data-tab-link]").forEach(a => a.classList.toggle("active", a.dataset.tabLink === t));
     renderActiveTab();   // recompute charts at the now-visible width
+    if (t === "search" && searchFeed) searchFeed.poll();   // snappy first load, then 5s polling
     window.scrollTo(0, 0);
   };
   window.addEventListener("hashchange", apply);
@@ -858,6 +995,7 @@ async function boot() {
   wireTabs();
   wireMetric();
   wireLookup();
+  wireSearch();
   let _rz; window.addEventListener("resize", () => { clearTimeout(_rz); _rz = setTimeout(renderActiveTab, 200); });
   try {
     await loadAll();
@@ -870,6 +1008,11 @@ async function boot() {
     // Real live feed — polls the server's in-memory window (server.py).
     const feed = new RealLiveFeed(() => { if (STATE.tab === "live") renderLive(); });
     feed.start();
+
+    // Gas oracle + mempool — polls only while the Search tab is active (server.py).
+    searchFeed = new SearchFeed(() => { if (STATE.tab === "search") renderSearch(); });
+    searchFeed.start();
+    if (STATE.tab === "search") searchFeed.poll();   // direct-load on #search
 
     const overlay = document.getElementById("boot-overlay");
     if (overlay) { overlay.classList.add("gone"); setTimeout(() => overlay.remove(), 500); }

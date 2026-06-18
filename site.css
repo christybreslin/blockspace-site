@@ -1046,12 +1046,19 @@ section.frame.bg-dark .section-lede  { color: var(--on-dark-muted); }
   box-shadow: var(--shadow-card);
   padding: clamp(1.25rem, 2vw, 1.75rem);
   margin-bottom: clamp(1.5rem, 2.5vw, 2.5rem);
-  max-width: 560px;
 }
-.lookup-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
-.lookup-head .kicker { color: var(--primary); }
-.lookup-num { font-size: var(--t-h4); font-weight: 540; color: var(--text-strong); font-feature-settings: "tnum"; }
-.lookup-metrics { display: flex; flex-direction: column; gap: 0.5rem; }
+.lookup-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; margin-bottom: 0.75rem; }
+.lookup-head .kicker { color: var(--primary); flex: none; }
+.lookup-num { font-size: var(--t-h4); font-weight: 540; color: var(--text-strong); font-feature-settings: "tnum"; min-width: 0; text-align: right; }
+/* full hashes/addresses are never shortened — wrap them on any char instead */
+.hex { word-break: break-all; }
+.lookup-num .hex { font-size: var(--t-body); }
+/* responsive grid so the card fills the row instead of hugging the left */
+.lookup-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); column-gap: clamp(1.5rem, 3vw, 3rem); row-gap: 0; }
+.lookup-metrics .tier-metric { padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
+.lookup-metrics .tier-metric .v { min-width: 0; text-align: right; }
+/* rows carrying a full address/hash get the whole row width so they read cleanly */
+.lookup-metrics .tier-metric:has(.hex) { grid-column: 1 / -1; }
 
 /* ============================================================
    Tiers tab — allocation buckets

@@ -33,6 +33,7 @@
         <li><a data-tab-link="block-value" href="#block-value" role="tab">Block value</a></li>
         <li><a data-tab-link="bid-win"      href="#bid-win"      role="tab">Bid &amp; win</a></li>
         <li><a data-tab-link="live"         href="#live"         role="tab">Live</a></li>
+        <li><a data-tab-link="search"       href="#search"       role="tab">Search</a></li>
       </ul>
 
       <div class="utilities">
@@ -234,6 +235,46 @@
           <div class="full-table-host">
             <table class="full-table" id="live-table"><!-- populated by JS --></table>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============================================================
+         TAB: SEARCH
+         ============================================================ -->
+    <div class="tab-pane" data-tab-content="search" role="tabpanel" hidden>
+      <section class="dashboard">
+        <div class="container">
+          <header class="dash-head">
+            <div class="dash-title-block">
+              <span class="kicker">Search · live execution RPC · on-demand</span>
+              <h1 class="dash-title">Search <em>the chain</em></h1>
+              <p class="dash-deck mono-stamp">block · tx · address — point lookups, computed server-side · gas oracle &amp; mempool live</p>
+            </div>
+          </header>
+
+          <div class="lookup-bar">
+            <div class="search"><input id="search-input" type="search" placeholder="Block number · 0x tx hash · 0x address · &quot;latest&quot;" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+            <button id="search-btn" class="btn-mini">Search</button>
+          </div>
+          <div id="search-result"></div>
+
+          <div class="dash-kpis cols-4" id="search-gas-kpis"><!-- populated by JS --></div>
+
+          <div class="dash-row">
+            <article class="dash-card">
+              <header class="dash-card-head"><span class="kicker">Gas oracle · base fee &amp; priority percentiles · last 30 blocks · gwei</span></header>
+              <div class="chart-legend">
+                <span><span class="swatch s-p99"></span>base fee</span>
+                <span><span class="swatch s-p50"></span>priority p50</span>
+                <span><span class="swatch s-p90"></span>priority p90</span>
+              </div>
+              <svg id="search-gas-chart" class="chart-svg" role="img" aria-label="Base fee and priority-fee percentiles over recent blocks"></svg>
+              <div class="chart-tooltip" id="search-gas-tt" aria-hidden="true"></div>
+            </article>
+          </div>
+
+          <div class="dash-kpis cols-4" id="search-mempool-kpis"><!-- populated by JS --></div>
         </div>
       </section>
     </div>
