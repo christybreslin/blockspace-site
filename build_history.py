@@ -50,10 +50,11 @@ def main():
 
     conn = sqlite3.connect(CACHE_DB)
     conn.execute("PRAGMA busy_timeout=60000")   # wait out the live server / catch-up locks
-    days = {}  # 'YYYY-MM-DD' -> list of per-block rewards (ETH)
+    days = {}      # 'YYYY-MM-DD' -> list of (unix ts, reward ETH)
+    day_nums = {}  # 'YYYY-MM-DD' -> list of block numbers (for the contiguity gap check)
     n = 0
-    for bd, rd in conn.execute(
-        "SELECT b.data, r.data FROM blocks b "
+    for num, bd, rd in conn.execute(
+        "SELECT b.number, b.data, r.data FROM blocks b "
         "LEFT JOIN receipts r ON b.number = r.number WHERE b.full = 1"
     ):
         if bd is None:
@@ -73,21 +74,29 @@ def main():
                 for x in json.loads(rd)
                 if int(x["effectiveGasPrice"], 16) > base
             ) / 1e18
-        days.setdefault(day, []).append((tsi, reward))   # (unix ts, reward ETH)
+        days.setdefault(day, []).append((tsi, reward))
+        day_nums.setdefault(day, []).append(num)
         n += 1
 
     # Bid rungs for the "Bid & win" tab (match the retired Dune export so the
     # app's finer-rung interpolation still works).
     BIDS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00, 2.00, 5.00]
 
+    # The only day that can be incomplete is the most recent one (the catch-up
+    # appends the chain tip), so that's the single day we hold back until it has
+    # a full day's blocks. Every earlier day is written regardless of count — a
+    # genuinely light day (e.g. a high-missed-slot day with ~6,800 blocks) is real
+    # data, not a partial; --min-blocks only gates the in-progress tail.
+    latest_day = max(days) if days else None
+
     rows = []          # daily_percentiles
     pooled = []        # every block reward, for the pooled full-period percentiles
-    day_rewards = {}   # qualifying day -> np.array of per-block rewards (for windowed pooled pctiles)
+    day_rewards = {}   # written day -> np.array of per-block rewards (for windowed pooled pctiles)
     bidrows = []       # bid_winnable: (day, my_bid, winnable_blocks, max_wait_min, max_wait_hours)
     for day in sorted(days):
         vals = days[day]
-        if len(vals) < args.min_blocks:
-            continue
+        if day == latest_day and len(vals) < args.min_blocks:
+            continue                      # current day still filling — hold back
         vals.sort()                       # by timestamp
         ts = [t for t, _ in vals]
         rewards = [r for _, r in vals]
@@ -196,10 +205,13 @@ def main():
     else:
         print("No complete days found — cache may be empty or below --min-blocks.")
 
-    # Interior coverage report: any calendar day inside the written span that did
-    # NOT get a row — either no blocks censused (a true gap) or fewer than
-    # --min-blocks (an incomplete day). These are exactly the empty cells in the
-    # Overview calendar, so this surfaces them at build time instead of by eye.
+    # Interior coverage report. Block numbers are globally contiguous (a missed
+    # slot produces no block and consumes no number), so a real census gap shows
+    # up as a hole in the number sequence — that's the authoritative test, not a
+    # raw block count (a genuinely light day has a full, hole-free number run).
+    # Reports two kinds of gap, both of which leave empty Overview-calendar cells:
+    #   • missing day  — a calendar day inside the span with no blocks at all
+    #   • partial day  — a day whose block numbers have a hole (some not censused)
     if args.report_gaps and rows:
         first = datetime.strptime(rows[0][0], "%Y-%m-%d").date()
         last = datetime.strptime(rows[-1][0], "%Y-%m-%d").date()
@@ -207,21 +219,26 @@ def main():
         d = first
         while d <= last:
             key = d.strftime("%Y-%m-%d")
-            got = len(days.get(key, []))
-            if got < args.min_blocks:
-                gaps.append((key, "missing — no blocks censused" if got == 0
-                             else f"short — {got:,} blocks < {args.min_blocks:,}"))
+            nums = day_nums.get(key)
+            if not nums:
+                gaps.append((key, "missing — no blocks censused"))
+            else:
+                lo, hi = min(nums), max(nums)
+                holes = (hi - lo + 1) - len(nums)
+                if holes:
+                    gaps.append((key, f"partial — {holes:,} block number(s) "
+                                      f"missing in {lo:,}…{hi:,}"))
             d += timedelta(days=1)
         if gaps:
-            print(f"\n⚠ {len(gaps)} interior day(s) missing or short "
-                  f"({first} → {last}) — empty on the Overview calendar:")
+            print(f"\n⚠ {len(gaps)} interior day(s) with gaps ({first} → {last}) "
+                  f"— empty/incomplete on the Overview calendar:")
             for day, why in gaps:
                 print(f"    {day}  {why}")
             print("  Backfill with: executionRewards.py --start <day> --end <next-day> "
                   "--complete  (then re-run build_history.py)")
         else:
-            print(f"\n✓ No interior gaps: {first} → {last} is complete "
-                  f"(every day ≥ {args.min_blocks:,} blocks).")
+            print(f"\n✓ No interior gaps: block numbers are contiguous across "
+                  f"{first} → {last} (every day fully censused).")
 
 
 if __name__ == "__main__":
