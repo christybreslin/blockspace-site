@@ -98,12 +98,25 @@ async function loadBlockValueDaily() {
   return finalize(parseCsv(txt).map(shape));
 }
 
+// Bid & win daily rows. Primary source is the server API backed by the cache DB
+// (/api/bidwait); falls back to the static CSV if the API is empty/down.
+async function loadBidWinDaily() {
+  const shape = r => ({ day: csvDay(r.day), my_bid: +r.my_bid, winnable_blocks: +r.winnable_blocks, max_wait_min: +r.max_wait_min, max_wait_hours: +r.max_wait_hours });
+  const finalize = arr => arr.filter(r => r.day && isFinite(r.my_bid));
+  try {
+    const res = await fetch("/api/bidwait");
+    if (res.ok) {
+      const j = await res.json();
+      if (j.bids && j.bids.length) return finalize(j.bids.map(shape));
+    }
+  } catch (e) { /* fall through to CSV */ }
+  const txt = await fetch("blockspace_max_wait.csv").then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); });
+  return finalize(parseCsv(txt).map(shape));
+}
+
 async function loadAll() {
-  const bwText = await fetch("blockspace_max_wait.csv").then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); });
   STATE.blockValueDaily = await loadBlockValueDaily();
-  STATE.bidWinDaily = parseCsv(bwText)
-    .map(r => ({ day: csvDay(r.day), my_bid: r.my_bid, winnable_blocks: r.winnable_blocks, max_wait_min: r.max_wait_min, max_wait_hours: r.max_wait_hours }))
-    .filter(r => r.day && isFinite(r.my_bid));
+  STATE.bidWinDaily = await loadBidWinDaily();
 
   // The Q2 export only sampled 8 fixed bids. Add 2 finer rungs below 1 ETH by
   // log-interpolating each day's real neighbouring rows, so the new bids stay

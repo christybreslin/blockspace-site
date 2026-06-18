@@ -58,7 +58,8 @@ def main():
         ts = block.get("timestamp")
         if ts is None:
             continue
-        day = datetime.fromtimestamp(int(ts, 16), tz=timezone.utc).strftime("%Y-%m-%d")
+        tsi = int(ts, 16)
+        day = datetime.fromtimestamp(tsi, tz=timezone.utc).strftime("%Y-%m-%d")
         base = int(block["baseFeePerGas"], 16)
         if not block.get("transactions") or rd is None:
             reward = 0.0
@@ -68,22 +69,48 @@ def main():
                 for x in json.loads(rd)
                 if int(x["effectiveGasPrice"], 16) > base
             ) / 1e18
-        days.setdefault(day, []).append(reward)
+        days.setdefault(day, []).append((tsi, reward))   # (unix ts, reward ETH)
         n += 1
 
-    rows = []
-    pooled = []   # every block of every complete day, for true full-period percentiles
+    # Bid rungs for the "Bid & win" tab (match the retired Dune export so the
+    # app's finer-rung interpolation still works).
+    BIDS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00, 2.00, 5.00]
+
+    rows = []          # daily_percentiles
+    pooled = []        # every block reward, for the pooled full-period percentiles
+    bidrows = []       # bid_winnable: (day, my_bid, winnable_blocks, max_wait_min, max_wait_hours)
     for day in sorted(days):
         vals = days[day]
         if len(vals) < args.min_blocks:
             continue
-        pooled.extend(vals)
-        a = np.array(vals)
+        vals.sort()                       # by timestamp
+        ts = [t for t, _ in vals]
+        rewards = [r for _, r in vals]
+        pooled.extend(rewards)
+        a = np.array(rewards)
         rows.append((
             day, len(a),
             float(np.percentile(a, 50)), float(np.percentile(a, 80)),
             float(np.percentile(a, 90)), float(np.percentile(a, 99)),
         ))
+
+        # Bid & win: you "win" a block if your bid >= its value (reward <= bid).
+        # max_wait = longest gap (minutes) between winnable blocks, including the
+        # stretch from day start to the first win and the last win to day end.
+        day_start = int(datetime.strptime(day, "%Y-%m-%d")
+                        .replace(tzinfo=timezone.utc).timestamp())
+        day_end = day_start + 86400
+        for bid in BIDS:
+            wins = [ts[i] for i in range(len(ts)) if rewards[i] <= bid]
+            n_win = len(wins)
+            if n_win == 0:
+                max_wait_s = 86400
+            else:
+                gaps = [wins[0] - day_start] + \
+                       [wins[i + 1] - wins[i] for i in range(n_win - 1)] + \
+                       [day_end - wins[-1]]
+                max_wait_s = max(gaps)
+            bidrows.append((day, bid, n_win, max_wait_s / 60.0, max_wait_s / 3600.0))
 
     # 1) Write the daily_percentiles table into the cache DB (the site reads this
     #    via the server's /api/history endpoint — the primary path for option B).
@@ -107,18 +134,31 @@ def main():
             "p99": float(np.percentile(pa, 99)), "max": float(pa.max()),
         }
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
+
+    # 1c) Bid & win table (the "Bid & win" tab reads this via /api/bidwait).
+    conn.execute("""CREATE TABLE IF NOT EXISTS bid_winnable (
+        day TEXT, my_bid REAL, winnable_blocks INTEGER,
+        max_wait_min REAL, max_wait_hours REAL, PRIMARY KEY (day, my_bid))""")
+    conn.execute("DELETE FROM bid_winnable")
+    conn.executemany(
+        "INSERT INTO bid_winnable (day,my_bid,winnable_blocks,max_wait_min,max_wait_hours) "
+        "VALUES (?,?,?,?,?)", bidrows)
     conn.commit()
 
-    # 2) Also write the CSV (fallback if the API/DB is unavailable).
+    # 2) Also write the CSVs (fallback if the API/DB is unavailable).
     with open(args.out, "w") as f:
         f.write("day,blocks,p50,p80,p90,p99\n")
         for day, blocks, p50, p80, p90, p99 in rows:
             f.write(f"{day} 00:00:00.000 UTC,{blocks},{p50},{p80},{p90},{p99}\n")
+    with open(os.path.join(BASE, "blockspace_max_wait.csv"), "w") as f:
+        f.write("day,my_bid,winnable_blocks,max_wait_min,max_wait_hours\n")
+        for day, bid, nwin, wmin, whr in bidrows:
+            f.write(f"{day} 00:00:00.000 UTC,{bid},{nwin},{wmin:.6f},{whr:.6f}\n")
 
     print(f"Scanned {n:,} cached blocks.")
     if rows:
-        print(f"Wrote {len(rows)} day rows ({rows[0][0]} → {rows[-1][0]}) "
-              f"to daily_percentiles table + {args.out}")
+        print(f"Wrote {len(rows)} day rows + {len(bidrows)} bid rows "
+              f"({rows[0][0]} → {rows[-1][0]}) to DB tables + CSVs")
     else:
         print("No complete days found — cache may be empty or below --min-blocks.")
 

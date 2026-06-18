@@ -75,6 +75,23 @@ def summary_dict():
         return {}
     finally:
         conn.close()
+
+
+def bidwait_rows():
+    """Bid & win rows from the cache DB's bid_winnable table; [] if absent."""
+    conn = _cache_conn()
+    if conn is None:
+        return []
+    try:
+        cur = conn.execute(
+            "SELECT day, my_bid, winnable_blocks, max_wait_min, max_wait_hours "
+            "FROM bid_winnable ORDER BY day, my_bid")
+        cols = ("day", "my_bid", "winnable_blocks", "max_wait_min", "max_wait_hours")
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
 WINDOW_MAX = 200          # rolling live blocks kept in memory
 SEED_N = 60               # blocks computed on startup
 POLL_SECS = 2             # head poll interval — catch new blocks fast
@@ -308,6 +325,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"head": head_number()})
             if path == "/api/history":
                 return self._json({"days": history_rows(), "pooled": summary_dict()})
+            if path == "/api/bidwait":
+                return self._json({"bids": bidwait_rows()})
             if path == "/api/live/recent":
                 n = min(int((q.get("n", ["120"])[0])), WINDOW_MAX)
                 with _win_lock:
