@@ -44,11 +44,44 @@ The server (`server.py`):
 
 ## Data
 
-- **History** — `block_rewards_percentiles.csv` (daily p50/p80/p90/p99, in ETH) and
-  `blockspace_max_wait.csv` (winnable blocks/day + worst-case wait per fixed bid). These
-  are exports of two Dune queries (a proposer-reward percentile query and a bid winnable/wait
-  query). They are a static snapshot; refresh them by re-running those queries.
+- **History** — `block_rewards_percentiles.csv` (daily p50/p80/p90/p99, in ETH) is now
+  built from a **complete local census** of every block (see "Building history" below),
+  not the old Dune export, so it is gap-free, current to the chain tip, and has a real p80.
+  `blockspace_max_wait.csv` (bid winnable/wait) is still the Dune export for now.
 - **Live + lookup** — computed on demand from the RPC.
+
+## Building history from your own node
+
+History is produced from a local SQLite cache of blocks, populated directly from your
+execution-layer endpoint by `executionRewards.py`, then turned into the CSV the site loads
+by `build_history.py`. Both read the **same `.env`** as the server, so there is one secret
+to manage and the RPC token is never committed (`.env`, `credentials.py`, and the cache DB
+are all gitignored).
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # requests, numpy, tqdm
+cp .env.example .env            # set EL_RPC_URL, EL_RPC_TOKEN, RPC_VERIFY=false if self-signed
+
+# 1. Build the cache from Jan 1 to the chain tip (complete census).
+#    ~88 blocks/s with the default 8 workers; durable and resumable if interrupted.
+.venv/bin/python executionRewards.py --start 2026-01-01 --complete
+
+# 2. Generate the history CSV the dashboard loads.
+.venv/bin/python build_history.py        # writes block_rewards_percentiles.csv
+
+# 3. Serve the site (standard library only).
+python3 server.py
+```
+
+Keep it current by re-running a catch-up plus the build (e.g. from cron):
+`python3 executionRewards.py --hours 36 --complete && python3 build_history.py`.
+The cache grows ~90 KB/block (~0.1 GB per month of full census). Run
+`python3 executionRewards.py --help` for all modes.
+
+**Metric note:** the census reward is the priority-fee sum
+`Σ(effectiveGasPrice − baseFee)·gasUsed` for every block (the block-value proxy the server
+also reports). The retired Dune history used the MEV-Boost builder→proposer payment for
+MEV blocks, which ran ~15–20% lower at p90, so the two are not directly comparable.
 
 **Reward definition** (mirrors the Dune query logic): priority-fee sum
 `Σ(effectiveGasPrice − baseFee)·gasUsed` for vanilla blocks; the builder→proposer payment

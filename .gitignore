@@ -14,3 +14,9 @@ Ethereum Block Subscription Service.pdf
 README (2).md
 STYLING.md
 dune-queries.txt
+
+# census tool: local-only secrets, cache DB, build artifacts
+credentials.py
+blocks_cache.sqlite
+*.sqlite
+*.sqlite-journal

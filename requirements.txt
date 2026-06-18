@@ -1,0 +1,5 @@
+# Needed only for the census/build tools (executionRewards.py, build_history.py).
+# server.py uses the standard library only.
+requests
+numpy
+tqdm
