@@ -829,6 +829,25 @@ function wireTabs() {
   apply();
 }
 
+// Footer build stamp: running code version + data freshness, from /api/health.
+// Turns amber (.stale) if the newest data day is more than 2 days behind today.
+async function renderBuildStamp() {
+  const el = document.getElementById("build-stamp");
+  if (!el) return;
+  try {
+    const h = await fetch("/api/health").then(r => r.json());
+    let txt = `v ${h.version || "?"}`;
+    if (h.commit_date) txt += ` · ${h.commit_date}`;
+    if (h.data_through) txt += ` · data ${h.data_through}`;
+    if (h.refreshed_at) txt += ` · refreshed ${new Date(h.refreshed_at * 1000).toISOString().slice(0, 16).replace("T", " ")}Z`;
+    el.textContent = txt;
+    if (h.data_through) {
+      const ageDays = (Date.now() / 1000 - Date.parse(h.data_through + "T00:00:00Z") / 1000) / 86400;
+      el.classList.toggle("stale", ageDays > 2);
+    }
+  } catch (e) { /* leave blank if health is unavailable */ }
+}
+
 // ============================================================
 //  Boot
 // ============================================================
@@ -846,6 +865,7 @@ async function boot() {
     document.querySelectorAll(".pulled-stamp").forEach(el => el.textContent = last ? dateShort(last.day) : "—");
     renderBidLadder();
     renderAll();
+    renderBuildStamp();
 
     // Real live feed — polls the server's in-memory window (server.py).
     const feed = new RealLiveFeed(() => { if (STATE.tab === "live") renderLive(); });

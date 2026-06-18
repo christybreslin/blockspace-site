@@ -133,6 +133,7 @@ def main():
             "p50": float(np.percentile(pa, 50)), "p80": float(np.percentile(pa, 80)),
             "p90": float(np.percentile(pa, 90)), "p95": float(np.percentile(pa, 95)),
             "p99": float(np.percentile(pa, 99)), "max": float(pa.max()),
+            "built_at": datetime.now(timezone.utc).timestamp(),   # last refresh time
         }
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
 

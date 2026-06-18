@@ -22,6 +22,7 @@ import json
 import os
 import sqlite3
 import ssl
+import subprocess
 import threading
 import time
 import urllib.request
@@ -34,6 +35,18 @@ from urllib.parse import urlparse, parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DB = os.path.join(BASE, "blocks_cache.sqlite")   # built by executionRewards.py + build_history.py
+
+
+def _git(*args):
+    try:
+        return subprocess.check_output(
+            ["git", "-C", BASE, *args], stderr=subprocess.DEVNULL, timeout=3).decode().strip()
+    except Exception:
+        return ""
+
+# Resolved once at startup so the footer shows the running code version.
+VERSION = _git("rev-parse", "--short", "HEAD") or "unknown"
+COMMIT_DATE = _git("log", "-1", "--date=short", "--format=%cd")
 
 
 def _cache_conn():
@@ -75,6 +88,20 @@ def summary_dict():
         return {k: v for k, v in conn.execute("SELECT key, value FROM summary")}
     except sqlite3.Error:
         return {}
+    finally:
+        conn.close()
+
+
+def data_through():
+    """Most recent day present in daily_percentiles (the data freshness mark)."""
+    conn = _cache_conn()
+    if conn is None:
+        return None
+    try:
+        r = conn.execute("SELECT max(day) FROM daily_percentiles").fetchone()
+        return r[0] if r else None
+    except sqlite3.Error:
+        return None
     finally:
         conn.close()
 
@@ -322,7 +349,11 @@ class Handler(SimpleHTTPRequestHandler):
     def _api(self, path, q):
         try:
             if path == "/api/health":
-                return self._json({"ok": True, "head": HEAD, "window": len(WINDOW)})
+                return self._json({
+                    "ok": True, "head": HEAD, "window": len(WINDOW),
+                    "version": VERSION, "commit_date": COMMIT_DATE,
+                    "data_through": data_through(), "refreshed_at": summary_dict().get("built_at"),
+                })
             if path == "/api/head":
                 return self._json({"head": head_number()})
             if path == "/api/history":

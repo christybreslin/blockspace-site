@@ -1201,6 +1201,8 @@ footer.site-foot .legal {
   gap: 1rem;
   justify-content: space-between;
 }
+footer.site-foot .legal .build-stamp { color: hsla(0, 0%, 100%, 0.55); }
+footer.site-foot .legal .build-stamp.stale { color: var(--warn); }
 
 /* ============================================================
    Responsive — phones & small tablets
