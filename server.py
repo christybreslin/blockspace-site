@@ -36,24 +36,45 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DB = os.path.join(BASE, "blocks_cache.sqlite")   # built by executionRewards.py + build_history.py
 
 
+def _cache_conn():
+    if not os.path.exists(CACHE_DB):
+        return None
+    try:
+        return sqlite3.connect(f"file:{CACHE_DB}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+
 def history_rows():
     """Daily reward percentiles from the cache DB's daily_percentiles table.
 
     Returns [] if the cache/table is absent, so the front end falls back to the CSV.
     """
-    if not os.path.exists(CACHE_DB):
+    conn = _cache_conn()
+    if conn is None:
         return []
     try:
-        conn = sqlite3.connect(f"file:{CACHE_DB}?mode=ro", uri=True)
-        try:
-            cur = conn.execute(
-                "SELECT day, blocks, p50, p80, p90, p99 FROM daily_percentiles ORDER BY day")
-            cols = ("day", "blocks", "p50", "p80", "p90", "p99")
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
-        finally:
-            conn.close()
+        cur = conn.execute(
+            "SELECT day, blocks, p50, p80, p90, p99 FROM daily_percentiles ORDER BY day")
+        cols = ("day", "blocks", "p50", "p80", "p90", "p99")
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
     except sqlite3.Error:
         return []
+    finally:
+        conn.close()
+
+
+def summary_dict():
+    """Pooled full-period percentiles (90th pct of every block), or {} if absent."""
+    conn = _cache_conn()
+    if conn is None:
+        return {}
+    try:
+        return {k: v for k, v in conn.execute("SELECT key, value FROM summary")}
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
 WINDOW_MAX = 200          # rolling live blocks kept in memory
 SEED_N = 60               # blocks computed on startup
 POLL_SECS = 2             # head poll interval — catch new blocks fast
@@ -286,7 +307,7 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/head":
                 return self._json({"head": head_number()})
             if path == "/api/history":
-                return self._json({"days": history_rows()})
+                return self._json({"days": history_rows(), "pooled": summary_dict()})
             if path == "/api/live/recent":
                 n = min(int((q.get("n", ["120"])[0])), WINDOW_MAX)
                 with _win_lock:

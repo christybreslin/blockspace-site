@@ -72,10 +72,12 @@ def main():
         n += 1
 
     rows = []
+    pooled = []   # every block of every complete day, for true full-period percentiles
     for day in sorted(days):
         vals = days[day]
         if len(vals) < args.min_blocks:
             continue
+        pooled.extend(vals)
         a = np.array(vals)
         rows.append((
             day, len(a),
@@ -91,6 +93,20 @@ def main():
     conn.executemany(
         "INSERT INTO daily_percentiles (day,blocks,p50,p80,p90,p99) VALUES (?,?,?,?,?,?)",
         rows)
+
+    # 1b) Pooled full-period percentiles over every block (a different statistic
+    #     from the daily values: the 90th percentile of the whole distribution).
+    conn.execute("CREATE TABLE IF NOT EXISTS summary (key TEXT PRIMARY KEY, value REAL)")
+    conn.execute("DELETE FROM summary")
+    if pooled:
+        pa = np.array(pooled)
+        summary = {
+            "blocks": float(len(pa)),
+            "p50": float(np.percentile(pa, 50)), "p80": float(np.percentile(pa, 80)),
+            "p90": float(np.percentile(pa, 90)), "p95": float(np.percentile(pa, 95)),
+            "p99": float(np.percentile(pa, 99)), "max": float(pa.max()),
+        }
+        conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
     conn.commit()
 
     # 2) Also write the CSV (fallback if the API/DB is unavailable).

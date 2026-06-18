@@ -88,7 +88,10 @@ async function loadBlockValueDaily() {
     const res = await fetch("/api/history");
     if (res.ok) {
       const j = await res.json();
-      if (j.days && j.days.length) return finalize(j.days.map(shape));
+      if (j.days && j.days.length) {
+        STATE.pooled = (j.pooled && isFinite(j.pooled.p90)) ? j.pooled : null;
+        return finalize(j.days.map(shape));
+      }
     }
   } catch (e) { /* fall through to CSV */ }
   const txt = await fetch("block_rewards_percentiles.csv").then(r => { if (!r.ok) throw new Error("percentiles.csv " + r.status); return r.text(); });
@@ -200,6 +203,10 @@ function renderOverview() {
     { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
     { label: "Regime", value: latest.p90 >= winAvgP90 ? "Hot" : "Quiet", foot: `vs ${STATE.window} p90`, cls: latest.p90 >= winAvgP90 ? "neg" : "" },
   ];
+  if (STATE.pooled) tiles.push({
+    label: "p90 · all blocks", value: ethF(STATE.pooled.p90),
+    foot: `pooled · ${numF(STATE.pooled.blocks)} blocks`, cls: "neutral",
+  });
   document.getElementById("hero-kpis").innerHTML = tiles.map(t => `
     <div class="dash-kpi" data-pulse>
       <div class="label">${t.label}</div>
