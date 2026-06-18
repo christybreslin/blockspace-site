@@ -157,15 +157,21 @@ def main():
         qual_days = sorted(day_rewards)            # ascending; same set as `rows`
         latest_year = qual_days[-1][:4]
 
-        def pooled_p90(day_list):
+        def pooled_pct(day_list, q):
             if not day_list:
                 return float("nan")
             arr = np.concatenate([day_rewards[d] for d in day_list])
-            return float(np.percentile(arr, 90))
+            return float(np.percentile(arr, q))
 
-        summary["p90_7d"] = pooled_p90(qual_days[-7:])
-        summary["p90_30d"] = pooled_p90(qual_days[-30:])
-        summary["p90_ytd"] = pooled_p90([d for d in qual_days if d[:4] == latest_year])
+        summary["p90_7d"] = pooled_pct(qual_days[-7:], 90)
+        summary["p90_30d"] = pooled_pct(qual_days[-30:], 90)
+        summary["p90_90d"] = pooled_pct(qual_days[-90:], 90)
+        summary["p90_ytd"] = pooled_pct([d for d in qual_days if d[:4] == latest_year], 90)
+        # Rolling trailing year: the headline pricing anchor. Always the most recent
+        # 365 days (fewer only until a full year of history exists), so it doesn't
+        # drift as the cache grows past a year.
+        summary["p90_365d"] = pooled_pct(qual_days[-365:], 90)
+        summary["p50_365d"] = pooled_pct(qual_days[-365:], 50)
 
         # Hot days: days whose daily p90 is >= 1.5x the full-period pooled p90 (a
         # "clearly elevated" regime, e.g. the late-April surge). rows[i] = (day,

@@ -222,29 +222,29 @@ function renderOverview() {
   const ytdDays = bv.filter(d => d.day.slice(0, 4) === year);
   const p90_7d  = fin(P.p90_7d,  avg(bv.slice(-7).map(d => d.p90)));
   const p90_30d = fin(P.p90_30d, avg(bv.slice(-30).map(d => d.p90)));
+  const p90_90d = fin(P.p90_90d, avg(bv.slice(-90).map(d => d.p90)));
   const p90_ytd = fin(P.p90_ytd, avg(ytdDays.map(d => d.p90)));
-  const p90_all = fin(P.p90,     avg(bv.map(d => d.p90)));
-  const p50_all = fin(P.p50,     avg(bv.map(d => d.p50)));
-  const hotThresh = fin(P.hot_threshold, 1.5 * p90_all);
+  const p90_1yr = fin(P.p90_365d, avg(bv.slice(-365).map(d => d.p90)));   // rolling trailing year
+  const p50_1yr = fin(P.p50_365d, avg(bv.slice(-365).map(d => d.p50)));
+  const hotThresh = fin(P.hot_threshold, 1.5 * fin(P.p90, p90_1yr));
   const hotDays   = fin(P.hot_days, bv.filter(d => d.p90 >= hotThresh).length);
   const hotTotal  = fin(P.hot_total_days, bv.length);
-  const blkFoot   = isFinite(P.blocks) ? `pooled · ${kF(P.blocks)} blocks` : "pooled";
 
   const tiles = [
-    // Row 1 — latest day snapshot + regime
+    // Row 1 — latest day snapshot + current activity
     { label: "Median · p50", value: ethF(latest.p50), foot: "latest day · ETH/block", cls: "neutral" },
     { label: "Win 90% · p90", value: ethF(latest.p90), foot: `latest · 30d ${signed(dP90)}`, cls: dP90 <= 0 ? "" : "neg" },
     { label: "Tail · p99", value: ethF(latest.p99), foot: `${(latest.p99 / latest.p50).toFixed(0)}× median`, cls: "neutral" },
     { label: "Blocks / day", value: numF(latest.blocks), foot: "latest · ~12s cadence", cls: "neutral" },
-    { label: "Regime", value: latest.p90 >= winAvgP90 ? "Hot" : "Quiet", foot: `vs ${STATE.window} p90`, cls: latest.p90 >= winAvgP90 ? "neg" : "" },
+    { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
     { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · list all →`, cls: hotDays > 0 ? "neg" : "neutral", href: "#hot-days" },
-    // Row 2 — p90 by lookback + pooled medians
+    // Row 2 — p90 by lookback + rolling-year anchor
     { label: "p90 · 7d", value: ethF(p90_7d), foot: "trailing week", cls: "neutral" },
     { label: "p90 · 30d", value: ethF(p90_30d), foot: "trailing month", cls: "neutral" },
+    { label: "p90 · 90d", value: ethF(p90_90d), foot: "trailing 90 days", cls: "neutral" },
     { label: "p90 · YTD", value: ethF(p90_ytd), foot: `${year} to date`, cls: "neutral" },
-    { label: "p90 · all", value: ethF(p90_all), foot: blkFoot, cls: "neutral" },
-    { label: "Median · all", value: ethF(p50_all), foot: blkFoot, cls: "neutral" },
-    { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
+    { label: "p90 · 1yr", value: ethF(p90_1yr), foot: "rolling 365 days", cls: "neutral" },
+    { label: "Median · 1yr", value: ethF(p50_1yr), foot: "rolling 365 days", cls: "neutral" },
   ];
   document.getElementById("hero-kpis").innerHTML = tiles.map(t => {
     const inner = `
@@ -273,11 +273,13 @@ function renderHotDays() {
   const P = STATE.pooled || {};
   const pooledP90 = isFinite(P.p90) ? P.p90 : avg(bv.map(d => d.p90));
   const thresh = isFinite(P.hot_threshold) ? P.hot_threshold : 1.5 * pooledP90;
-  const hot = bv.filter(d => d.p90 >= thresh).sort((a, b) => b.p90 - a.p90);
+  const hot = bv.filter(d => d.p90 >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
 
-  document.getElementById("hot-deck").innerHTML =
+  const hotDeck = document.getElementById("hot-deck");
+  hotDeck.innerHTML =
     `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(bv.length)}</span> days · ` +
-    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× pooled <span class="mono">${ethF(pooledP90)}</span>)`;
+    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× pooled <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
+  hotDeck.classList.toggle("stale", dataIsStale());
 
   const head = `<thead><tr>
     <th>Day</th><th>p90 · ETH</th><th>× pooled</th><th>p50 · ETH</th><th>p99 · ETH</th><th>Blocks</th>
@@ -318,8 +320,10 @@ function renderBlockValue() {
     <div class="dash-kpi" data-pulse><div class="label">${k.label}</div><div class="value">${k.value}</div><div class="foot neutral">${k.foot}</div></div>`).join("");
 
   const lo = days[0], hi = days[days.length - 1];
-  document.getElementById("bv-deck").textContent =
-    `${dateShort(lo.day)} → ${dateShort(hi.day)} · ${days.length} days · proposer take${span > 1 ? ` · ${span}-day avg` : ""}`;
+  const bvDeck = document.getElementById("bv-deck");
+  bvDeck.innerHTML =
+    `${dateShort(lo.day)} → ${dateShort(hi.day)} · ${days.length} days · proposer take${span > 1 ? ` · ${span}-day avg` : ""}${refreshStamp()}`;
+  bvDeck.classList.toggle("stale", dataIsStale());
 
   renderBvTable();
 }
@@ -401,8 +405,10 @@ function renderBidWin() {
   document.getElementById("bw-kpis").innerHTML = kpis.map(k => `
     <div class="dash-kpi" data-pulse><div class="label">${k.label}</div><div class="value">${k.value}</div><div class="foot neutral">${k.foot}</div></div>`).join("");
 
-  document.getElementById("bw-deck").textContent =
-    `bid ${ethF(bid)} ETH · ${kF(sel.avgWin)} blocks/day · ${pctF(sel.avgShare)} share · ${STATE.window} avg`;
+  const bwDeck = document.getElementById("bw-deck");
+  bwDeck.innerHTML =
+    `bid ${ethF(bid)} ETH · ${kF(sel.avgWin)} blocks/day · ${pctF(sel.avgShare)} share · ${STATE.window} avg${refreshStamp()}`;
+  bwDeck.classList.toggle("stale", dataIsStale());
 
   renderBwTable(aggs);
 }
