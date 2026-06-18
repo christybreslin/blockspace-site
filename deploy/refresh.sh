@@ -15,5 +15,7 @@ PY=".venv/bin/python"
 # Last 6h covers the gap since the previous run (with overlap); only new blocks
 # are fetched, the rest are cache hits.
 "$PY" executionRewards.py --hours 6 --complete
-"$PY" build_history.py
+# --report-gaps logs any missing/short interior days (empty Overview calendar
+# cells) so a census gap shows up in the refresh log instead of by eye.
+"$PY" build_history.py --report-gaps
 echo "refresh complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
