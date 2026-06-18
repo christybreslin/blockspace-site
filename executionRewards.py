@@ -477,9 +477,10 @@ def main():
     tip = current_block_number()
     print(f"  Current block: {tip:,}")
 
-    # Conservative search window: ~1.1M blocks covers ~154 days at 12s/block
-    # We search from (tip - 1,100,000) to tip for the start block
-    search_lo = max(0, tip - 1_150_000)
+    # Binary-search the whole chain for the start block (~25 probes, cached in
+    # ts_index after the first run), so any --start date works — months or years
+    # back — not just a fixed recent window.
+    search_lo = 0
     start_block = cached_block_at_timestamp(START_TS, search_lo, tip)
     end_block   = cached_block_at_timestamp(END_TS,   start_block, tip)
     n_blocks    = end_block - start_block
