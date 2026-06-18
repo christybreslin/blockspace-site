@@ -79,15 +79,25 @@ function parseCsv(text) {
 }
 const csvDay = s => String(s).split(" ")[0];   // "2024-06-15 00:00:00.000 UTC" -> "2024-06-15"
 
+// Daily block-value percentiles. Primary source is the server API backed by the
+// cache DB (/api/history); falls back to the static CSV if the API is empty/down.
+async function loadBlockValueDaily() {
+  const shape = r => ({ day: csvDay(r.day), blocks: +r.blocks, p50: +r.p50, p80: +r.p80, p90: +r.p90, p99: +r.p99 });
+  const finalize = arr => arr.filter(r => r.day && isFinite(r.p50)).sort((a, b) => a.day < b.day ? -1 : 1);
+  try {
+    const res = await fetch("/api/history");
+    if (res.ok) {
+      const j = await res.json();
+      if (j.days && j.days.length) return finalize(j.days.map(shape));
+    }
+  } catch (e) { /* fall through to CSV */ }
+  const txt = await fetch("block_rewards_percentiles.csv").then(r => { if (!r.ok) throw new Error("percentiles.csv " + r.status); return r.text(); });
+  return finalize(parseCsv(txt).map(shape));
+}
+
 async function loadAll() {
-  const [bvText, bwText] = await Promise.all([
-    fetch("block_rewards_percentiles.csv").then(r => { if (!r.ok) throw new Error("percentiles.csv " + r.status); return r.text(); }),
-    fetch("blockspace_max_wait.csv").then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); }),
-  ]);
-  STATE.blockValueDaily = parseCsv(bvText)
-    .map(r => ({ day: csvDay(r.day), blocks: r.blocks, p50: r.p50, p80: r.p80, p90: r.p90, p99: r.p99 }))
-    .filter(r => r.day && isFinite(r.p50))
-    .sort((a, b) => a.day < b.day ? -1 : 1);
+  const bwText = await fetch("blockspace_max_wait.csv").then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); });
+  STATE.blockValueDaily = await loadBlockValueDaily();
   STATE.bidWinDaily = parseCsv(bwText)
     .map(r => ({ day: csvDay(r.day), my_bid: r.my_bid, winnable_blocks: r.winnable_blocks, max_wait_min: r.max_wait_min, max_wait_hours: r.max_wait_hours }))
     .filter(r => r.day && isFinite(r.my_bid));

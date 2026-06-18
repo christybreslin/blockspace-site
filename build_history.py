@@ -78,19 +78,31 @@ def main():
             continue
         a = np.array(vals)
         rows.append((
-            f"{day} 00:00:00.000 UTC", len(a),
-            np.percentile(a, 50), np.percentile(a, 80),
-            np.percentile(a, 90), np.percentile(a, 99),
+            day, len(a),
+            float(np.percentile(a, 50)), float(np.percentile(a, 80)),
+            float(np.percentile(a, 90)), float(np.percentile(a, 99)),
         ))
 
+    # 1) Write the daily_percentiles table into the cache DB (the site reads this
+    #    via the server's /api/history endpoint — the primary path for option B).
+    conn.execute("""CREATE TABLE IF NOT EXISTS daily_percentiles (
+        day TEXT PRIMARY KEY, blocks INTEGER, p50 REAL, p80 REAL, p90 REAL, p99 REAL)""")
+    conn.execute("DELETE FROM daily_percentiles")
+    conn.executemany(
+        "INSERT INTO daily_percentiles (day,blocks,p50,p80,p90,p99) VALUES (?,?,?,?,?,?)",
+        rows)
+    conn.commit()
+
+    # 2) Also write the CSV (fallback if the API/DB is unavailable).
     with open(args.out, "w") as f:
         f.write("day,blocks,p50,p80,p90,p99\n")
         for day, blocks, p50, p80, p90, p99 in rows:
-            f.write(f"{day},{blocks},{p50},{p80},{p90},{p99}\n")
+            f.write(f"{day} 00:00:00.000 UTC,{blocks},{p50},{p80},{p90},{p99}\n")
 
     print(f"Scanned {n:,} cached blocks.")
     if rows:
-        print(f"Wrote {len(rows)} day rows ({rows[0][0][:10]} → {rows[-1][0][:10]}) to {args.out}")
+        print(f"Wrote {len(rows)} day rows ({rows[0][0]} → {rows[-1][0]}) "
+              f"to daily_percentiles table + {args.out}")
     else:
         print("No complete days found — cache may be empty or below --min-blocks.")
 
