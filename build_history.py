@@ -167,20 +167,23 @@ def main():
         summary["p90_30d"] = pooled_pct(qual_days[-30:], 90)
         summary["p90_90d"] = pooled_pct(qual_days[-90:], 90)
         summary["p90_ytd"] = pooled_pct([d for d in qual_days if d[:4] == latest_year], 90)
-        # Rolling trailing year: the headline pricing anchor. Always the most recent
-        # 365 days (fewer only until a full year of history exists), so it doesn't
-        # drift as the cache grows past a year.
-        summary["p90_365d"] = pooled_pct(qual_days[-365:], 90)
-        summary["p50_365d"] = pooled_pct(qual_days[-365:], 50)
+        # Rolling trailing year: the headline pricing anchor, and the single basis
+        # every headline figure shares. Always the most recent 365 days (fewer only
+        # until a full year of history exists), so it doesn't drift as the cache
+        # grows past a year.
+        ry_days = qual_days[-365:]
+        summary["p90_365d"] = pooled_pct(ry_days, 90)
+        summary["p50_365d"] = pooled_pct(ry_days, 50)
 
-        # Hot days: days whose daily p90 is >= 1.5x the full-period pooled p90 (a
-        # "clearly elevated" regime, e.g. the late-April surge). rows[i] = (day,
-        # blocks, p50, p80, p90, p99) so the daily p90 is index 4.
-        hot_threshold = 1.5 * summary["p90"]
+        # Hot days: days within the rolling year whose daily p90 is >= 1.5x the
+        # rolling-year pooled p90 (a "clearly elevated" regime, e.g. the late-April
+        # surge). rows[i] = (day, blocks, p50, p80, p90, p99) so daily p90 is idx 4.
+        daily_p90 = {r[0]: r[4] for r in rows}
+        hot_threshold = 1.5 * summary["p90_365d"]
         summary["hot_threshold"] = hot_threshold
-        summary["hot_days"] = float(sum(1 for r in rows if r[4] >= hot_threshold))
-        summary["hot_total_days"] = float(len(rows))
-        summary["hot_peak"] = float(max((r[4] for r in rows), default=0.0))
+        summary["hot_days"] = float(sum(1 for d in ry_days if daily_p90[d] >= hot_threshold))
+        summary["hot_total_days"] = float(len(ry_days))
+        summary["hot_peak"] = float(max((daily_p90[d] for d in ry_days), default=0.0))
 
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
 

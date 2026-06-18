@@ -13,12 +13,12 @@
 // ============================================================
 
 const BID_LADDER = [0.02, 0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1.0];   // ETH — capped at 1; 0.15 & 0.75 interpolated from the Q2 export
-const WINDOW_DAYS = { "7d": 7, "30d": 30, "90d": 90, "24mo": 730 };
+const WINDOW_DAYS = { "7d": 7, "30d": 30, "90d": 90, "1yr": 365 };
 const LIVE_CAP = 200;        // rolling blocks kept in memory
 const LIVE_ROLL = 50;        // rolling-stat window
 
 const STATE = {
-  window: "24mo",
+  window: "1yr",
   bid: 0.25,
   theme: "light",
   blockValueDaily: [],
@@ -226,9 +226,9 @@ function renderOverview() {
   const p90_ytd = fin(P.p90_ytd, avg(ytdDays.map(d => d.p90)));
   const p90_1yr = fin(P.p90_365d, avg(bv.slice(-365).map(d => d.p90)));   // rolling trailing year
   const p50_1yr = fin(P.p50_365d, avg(bv.slice(-365).map(d => d.p50)));
-  const hotThresh = fin(P.hot_threshold, 1.5 * fin(P.p90, p90_1yr));
-  const hotDays   = fin(P.hot_days, bv.filter(d => d.p90 >= hotThresh).length);
-  const hotTotal  = fin(P.hot_total_days, bv.length);
+  const hotThresh = fin(P.hot_threshold, 1.5 * p90_1yr);
+  const hotDays   = fin(P.hot_days, bv.slice(-365).filter(d => d.p90 >= hotThresh).length);
+  const hotTotal  = fin(P.hot_total_days, Math.min(bv.length, 365));
 
   const tiles = [
     // Row 1 — latest day snapshot + current activity
@@ -264,21 +264,22 @@ function renderOverview() {
 }
 
 // ----- Hot days (drill-down from the Overview KPI) ----------
-// Every day whose daily p90 cleared the hot threshold (1.5× the pooled p90),
-// hottest first. All-time, independent of the window switch — same basis as the
-// "Hot days" KPI tile.
+// Every day in the rolling trailing year whose daily p90 cleared the hot
+// threshold (1.5× the rolling-year pooled p90), most recent first — same basis
+// as the "Hot days" KPI tile and every other headline figure.
 function renderHotDays() {
   const bv = STATE.blockValueDaily;
   if (!bv.length) return;
   const P = STATE.pooled || {};
-  const pooledP90 = isFinite(P.p90) ? P.p90 : avg(bv.map(d => d.p90));
+  const ry = bv.slice(-365);                                   // rolling year
+  const pooledP90 = isFinite(P.p90_365d) ? P.p90_365d : avg(ry.map(d => d.p90));
   const thresh = isFinite(P.hot_threshold) ? P.hot_threshold : 1.5 * pooledP90;
-  const hot = bv.filter(d => d.p90 >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
+  const hot = ry.filter(d => d.p90 >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
 
   const hotDeck = document.getElementById("hot-deck");
   hotDeck.innerHTML =
-    `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(bv.length)}</span> days · ` +
-    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× pooled <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
+    `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(ry.length)}</span> days · rolling year · ` +
+    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× rolling-year pooled <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
   hotDeck.classList.toggle("stale", dataIsStale());
 
   const head = `<thead><tr>
@@ -301,7 +302,7 @@ function renderBlockValue() {
   const days = windowDays();
   const dates = days.map(d => d.day);
 
-  const span = STATE.window === "24mo" ? 7 : STATE.window === "90d" ? 5 : STATE.window === "30d" ? 3 : 1;
+  const span = STATE.window === "1yr" ? 7 : STATE.window === "90d" ? 5 : STATE.window === "30d" ? 3 : 1;
   buildFanChart("bv-chart", {
     dates, log: true, tooltipId: "bv-tooltip",
     titleSuffix: span > 1 ? `${span}-day avg` : null,
