@@ -118,6 +118,10 @@ def init_cache():
     # check_same_thread=False so the worker threads (block + receipts fetched in
     # parallel) may share the connection; all access is serialised via _db_lock.
     _conn = sqlite3.connect(CACHE_DB, check_same_thread=False)
+    # WAL lets the live web server read the cache while a refresh writes to it;
+    # busy_timeout makes any contended access wait rather than erroring.
+    _conn.execute("PRAGMA journal_mode=WAL")
+    _conn.execute("PRAGMA busy_timeout=30000")
     _conn.execute(
         "CREATE TABLE IF NOT EXISTS blocks ("
         "  number INTEGER NOT NULL,"

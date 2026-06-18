@@ -1,0 +1,16 @@
+[Unit]
+Description=Blockspace dashboard (server.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Set these two to your checkout path:
+WorkingDirectory=/opt/blockspace-site
+EnvironmentFile=/etc/blockspace/env
+ExecStart=/usr/bin/python3 server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

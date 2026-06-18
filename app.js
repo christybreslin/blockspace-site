@@ -59,7 +59,7 @@ function isoDay(d) { return d.toISOString().slice(0, 10); }
 
 // ============================================================
 //  REAL DATA
-//   - History: the two Dune CSV exports (block value + max wait).
+//   - History: the cache DB via /api (block value + bid/wait), CSV fallback.
 //   - Live + search: the /api RPC wrapper (server.py).
 //  This is the data seam — nothing below here knows the source.
 // ============================================================

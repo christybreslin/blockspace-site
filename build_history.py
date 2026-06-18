@@ -46,6 +46,7 @@ def main():
         sys.exit(f"No cache at {CACHE_DB} — run executionRewards.py first.")
 
     conn = sqlite3.connect(CACHE_DB)
+    conn.execute("PRAGMA busy_timeout=60000")   # wait out the live server / catch-up locks
     days = {}  # 'YYYY-MM-DD' -> list of per-block rewards (ETH)
     n = 0
     for bd, rd in conn.execute(

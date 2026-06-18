@@ -40,7 +40,9 @@ def _cache_conn():
     if not os.path.exists(CACHE_DB):
         return None
     try:
-        return sqlite3.connect(f"file:{CACHE_DB}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{CACHE_DB}?mode=ro", uri=True)
+        conn.execute("PRAGMA busy_timeout=5000")   # wait, don't error, if a refresh is mid-write
+        return conn
     except sqlite3.Error:
         return None
 

@@ -73,10 +73,38 @@ cp .env.example .env            # set EL_RPC_URL, EL_RPC_TOKEN, RPC_VERIFY=false
 python3 server.py
 ```
 
-Keep it current by re-running a catch-up plus the build (e.g. from cron):
-`python3 executionRewards.py --hours 36 --complete && python3 build_history.py`.
 The cache grows ~90 KB/block (~0.1 GB per month of full census). Run
 `python3 executionRewards.py --help` for all modes.
+
+## Staying up to date automatically
+
+A refresh = catch the cache up to the tip, then rebuild the tables. The **live
+server does not need restarting** — it reads the tables on each request, so the next
+page load shows the fresh data (and the Live tab is already real-time). The cache is
+in WAL mode, so the server keeps serving while a refresh writes.
+
+`deploy/` has ready-made systemd units plus the refresh script:
+
+```bash
+# one-time install (edit the WorkingDirectory paths in the unit files first)
+sudo cp deploy/blockspace.service deploy/blockspace-refresh.service \
+        deploy/blockspace-refresh.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now blockspace.service          # serve on boot
+sudo systemctl enable --now blockspace-refresh.timer    # hourly catch-up + rebuild
+```
+
+Check it: `systemctl status blockspace`, `systemctl list-timers blockspace-refresh`,
+`journalctl -u blockspace-refresh -n 50`.
+
+Cron alternative (load the env, then catch-up + rebuild hourly):
+```cron
+17 * * * * cd /opt/blockspace-site && set -a && . /etc/blockspace/env && set +a && deploy/refresh.sh >> /var/log/blockspace-refresh.log 2>&1
+```
+
+`deploy/refresh.sh` runs `executionRewards.py --hours 6 --complete` then
+`build_history.py`. Adjust the timer/`--hours` to taste (hourly is fine; the rebuild
+re-scans the whole cache, a few minutes, and grows slowly as history accumulates).
 
 **Metric note:** the census reward is the priority-fee sum
 `Σ(effectiveGasPrice − baseFee)·gasUsed` for every block (the block-value proxy the server

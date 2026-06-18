@@ -1,0 +1,11 @@
+[Unit]
+Description=Blockspace cache catch-up + table rebuild
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set these to your checkout path:
+WorkingDirectory=/opt/blockspace-site
+EnvironmentFile=/etc/blockspace/env
+ExecStart=/opt/blockspace-site/deploy/refresh.sh
