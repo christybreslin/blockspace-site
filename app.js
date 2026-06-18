@@ -210,18 +210,39 @@ function renderOverview() {
   document.getElementById("hero-stamp").innerHTML =
     `<span class="mono">${dateShort(latest.day)}</span> · latest day · window <span class="mono">${STATE.window}</span> · <span class="mono">${days.length}</span> days`;
 
+  // Pooled / windowed figures. Prefer the server's true pooled percentiles
+  // (90th pct of every block in the window); fall back to an average of daily
+  // p90s only when running off the static CSV (no /api/history summary).
+  const P = STATE.pooled || {};
+  const fin = (x, fallback) => isFinite(x) ? x : fallback;
+  const year = latest.day.slice(0, 4);
+  const ytdDays = bv.filter(d => d.day.slice(0, 4) === year);
+  const p90_7d  = fin(P.p90_7d,  avg(bv.slice(-7).map(d => d.p90)));
+  const p90_30d = fin(P.p90_30d, avg(bv.slice(-30).map(d => d.p90)));
+  const p90_ytd = fin(P.p90_ytd, avg(ytdDays.map(d => d.p90)));
+  const p90_all = fin(P.p90,     avg(bv.map(d => d.p90)));
+  const p50_all = fin(P.p50,     avg(bv.map(d => d.p50)));
+  const hotThresh = fin(P.hot_threshold, 1.5 * p90_all);
+  const hotDays   = fin(P.hot_days, bv.filter(d => d.p90 >= hotThresh).length);
+  const hotTotal  = fin(P.hot_total_days, bv.length);
+  const blkFoot   = isFinite(P.blocks) ? `pooled · ${kF(P.blocks)} blocks` : "pooled";
+
   const tiles = [
-    { label: "Median · p50", value: ethF(latest.p50), foot: "ETH/block", cls: "neutral" },
-    { label: "Win 90% · p90", value: ethF(latest.p90), foot: `30d ${signed(dP90)}`, cls: dP90 <= 0 ? "" : "neg" },
+    // Row 1 — latest day snapshot + regime
+    { label: "Median · p50", value: ethF(latest.p50), foot: "latest day · ETH/block", cls: "neutral" },
+    { label: "Win 90% · p90", value: ethF(latest.p90), foot: `latest · 30d ${signed(dP90)}`, cls: dP90 <= 0 ? "" : "neg" },
     { label: "Tail · p99", value: ethF(latest.p99), foot: `${(latest.p99 / latest.p50).toFixed(0)}× median`, cls: "neutral" },
-    { label: "Blocks / day", value: numF(latest.blocks), foot: "~12s cadence", cls: "neutral" },
-    { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
+    { label: "Blocks / day", value: numF(latest.blocks), foot: "latest · ~12s cadence", cls: "neutral" },
     { label: "Regime", value: latest.p90 >= winAvgP90 ? "Hot" : "Quiet", foot: `vs ${STATE.window} p90`, cls: latest.p90 >= winAvgP90 ? "neg" : "" },
+    { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · 1.5× pooled`, cls: hotDays > 0 ? "neg" : "neutral" },
+    // Row 2 — p90 by lookback + pooled medians
+    { label: "p90 · 7d", value: ethF(p90_7d), foot: "trailing week", cls: "neutral" },
+    { label: "p90 · 30d", value: ethF(p90_30d), foot: "trailing month", cls: "neutral" },
+    { label: "p90 · YTD", value: ethF(p90_ytd), foot: `${year} to date`, cls: "neutral" },
+    { label: "p90 · all", value: ethF(p90_all), foot: blkFoot, cls: "neutral" },
+    { label: "Median · all", value: ethF(p50_all), foot: blkFoot, cls: "neutral" },
+    { label: "p90 · window avg", value: ethF(winAvgP90), foot: `${STATE.window} mean`, cls: "neutral" },
   ];
-  if (STATE.pooled) tiles.push({
-    label: "p90 · all blocks", value: ethF(STATE.pooled.p90),
-    foot: `pooled · ${numF(STATE.pooled.blocks)} blocks`, cls: "neutral",
-  });
   document.getElementById("hero-kpis").innerHTML = tiles.map(t => `
     <div class="dash-kpi" data-pulse>
       <div class="label">${t.label}</div>

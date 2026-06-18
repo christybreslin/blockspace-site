@@ -79,6 +79,7 @@ def main():
 
     rows = []          # daily_percentiles
     pooled = []        # every block reward, for the pooled full-period percentiles
+    day_rewards = {}   # qualifying day -> np.array of per-block rewards (for windowed pooled pctiles)
     bidrows = []       # bid_winnable: (day, my_bid, winnable_blocks, max_wait_min, max_wait_hours)
     for day in sorted(days):
         vals = days[day]
@@ -88,6 +89,7 @@ def main():
         ts = [t for t, _ in vals]
         rewards = [r for _, r in vals]
         pooled.extend(rewards)
+        day_rewards[day] = np.asarray(rewards)
         a = np.array(rewards)
         rows.append((
             day, len(a),
@@ -135,6 +137,33 @@ def main():
             "p99": float(np.percentile(pa, 99)), "max": float(pa.max()),
             "built_at": datetime.now(timezone.utc).timestamp(),   # last refresh time
         }
+
+        # Windowed pooled p90s: the true 90th percentile of every block in each
+        # trailing window (not an average of daily p90s), so they stay on the same
+        # footing as the full-period "everything" p90 above. Windows are anchored on
+        # the most recent qualifying day so the figures are deterministic.
+        qual_days = sorted(day_rewards)            # ascending; same set as `rows`
+        latest_year = qual_days[-1][:4]
+
+        def pooled_p90(day_list):
+            if not day_list:
+                return float("nan")
+            arr = np.concatenate([day_rewards[d] for d in day_list])
+            return float(np.percentile(arr, 90))
+
+        summary["p90_7d"] = pooled_p90(qual_days[-7:])
+        summary["p90_30d"] = pooled_p90(qual_days[-30:])
+        summary["p90_ytd"] = pooled_p90([d for d in qual_days if d[:4] == latest_year])
+
+        # Hot days: days whose daily p90 is >= 1.5x the full-period pooled p90 (a
+        # "clearly elevated" regime, e.g. the late-April surge). rows[i] = (day,
+        # blocks, p50, p80, p90, p99) so the daily p90 is index 4.
+        hot_threshold = 1.5 * summary["p90"]
+        summary["hot_threshold"] = hot_threshold
+        summary["hot_days"] = float(sum(1 for r in rows if r[4] >= hot_threshold))
+        summary["hot_total_days"] = float(len(rows))
+        summary["hot_peak"] = float(max((r[4] for r in rows), default=0.0))
+
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
 
     # 1c) Bid & win table (the "Bid & win" tab reads this via /api/bidwait).
