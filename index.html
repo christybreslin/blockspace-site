@@ -64,7 +64,13 @@
               <span class="kicker">Overview · price of Ethereum blockspace</span>
               <h1 class="dash-title">Block value &amp; supply</h1>
             </div>
-            <p class="mono-stamp" id="hero-stamp">—</p>
+            <div class="dash-head-aside">
+              <div class="hist-metric window-switch" role="tablist" aria-label="Value basis">
+                <button data-hmetric="fees" role="tab" class="active">Priority fees</button>
+                <button data-hmetric="take" role="tab">Proposer take</button>
+              </div>
+              <p class="mono-stamp" id="hero-stamp">—</p>
+            </div>
           </header>
 
           <div class="dash-kpis cols-6" id="hero-kpis"><!-- populated by JS --></div>
@@ -126,6 +132,10 @@
               <span class="kicker">Block value · per-block reward, ETH</span>
               <h1 class="dash-title">Block value</h1>
               <p class="dash-deck mono-stamp" id="bv-deck">—</p>
+            </div>
+            <div class="hist-metric window-switch" role="tablist" aria-label="Value basis">
+              <button data-hmetric="fees" role="tab" class="active">Priority fees</button>
+              <button data-hmetric="take" role="tab">Proposer take</button>
             </div>
           </header>
 

@@ -72,10 +72,20 @@ def history_rows():
     conn = _cache_conn()
     if conn is None:
         return []
+    fees = ("day", "blocks", "p50", "p80", "p90", "p99")
+    take = ("take_p50", "take_p80", "take_p90", "take_p99")
     try:
-        cur = conn.execute(
-            "SELECT day, blocks, p50, p80, p90, p99 FROM daily_percentiles ORDER BY day")
-        cols = ("day", "blocks", "p50", "p80", "p90", "p99")
+        # Prefer the take-aware schema; fall back to fees-only if build_history
+        # hasn't rebuilt the table with the take_* columns yet.
+        try:
+            cur = conn.execute(
+                "SELECT day,blocks,p50,p80,p90,p99,take_p50,take_p80,take_p90,take_p99 "
+                "FROM daily_percentiles ORDER BY day")
+            cols = fees + take
+        except sqlite3.OperationalError:
+            cur = conn.execute(
+                "SELECT day, blocks, p50, p80, p90, p99 FROM daily_percentiles ORDER BY day")
+            cols = fees
         return [dict(zip(cols, r)) for r in cur.fetchall()]
     except sqlite3.Error:
         return []

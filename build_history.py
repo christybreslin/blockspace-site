@@ -35,6 +35,35 @@ CACHE_DB = os.path.join(BASE, "blocks_cache.sqlite")
 OUT_CSV = os.path.join(BASE, "block_rewards_percentiles.csv")
 
 
+def block_take(block, fees):
+    """Proposer take = the builder→proposer payment for an MEV-Boost block, else
+    the priority-fee sum. Mirrors server.py compute(): the payment is the final
+    transaction, a plain ETH transfer (no calldata, no priority fee) sent by a
+    named builder. Falls back to `fees` for any block not yet enriched with the
+    proposer-take fields (pre-re-pull), so a part-enriched cache still builds.
+    """
+    txs = block.get("transactions") or []
+    if not txs:
+        return fees
+    last = txs[-1]
+    if not isinstance(last, dict) or "value" not in last:
+        return fees                                  # pre-enrichment slim → no take info
+    mev_pay = int(last["value"], 16) / 1e18
+    data = last.get("input", "0x") or "0x"
+    mp = last.get("maxPriorityFeePerGas")
+    maxprio = int(mp, 16) if mp else 0
+    extra = block.get("extraData", "0x") or "0x"
+    try:
+        builder = bytes.fromhex(extra[2:]).decode("utf-8", "replace")
+    except ValueError:
+        builder = ""
+    builder = "".join(c for c in builder if c >= " " and c != "�").strip()
+    bl = builder.lower()
+    vanilla = ("geth" in bl or "nethermind" in bl or len(builder) < 2
+               or mev_pay == 0 or data != "0x" or maxprio > 0)
+    return fees if vanilla else mev_pay
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build history CSV from the block cache.")
     ap.add_argument("--min-blocks", type=int, default=7000,
@@ -74,7 +103,8 @@ def main():
                 for x in json.loads(rd)
                 if int(x["effectiveGasPrice"], 16) > base
             ) / 1e18
-        days.setdefault(day, []).append((tsi, reward))
+        take = block_take(block, reward)
+        days.setdefault(day, []).append((tsi, reward, take))
         day_nums.setdefault(day, []).append(num)
         n += 1
 
@@ -89,24 +119,31 @@ def main():
     # data, not a partial; --min-blocks only gates the in-progress tail.
     latest_day = max(days) if days else None
 
-    rows = []          # daily_percentiles
-    pooled = []        # every block reward, for the pooled full-period percentiles
-    day_rewards = {}   # written day -> np.array of per-block rewards (for windowed pooled pctiles)
+    rows = []          # daily_percentiles (fees + take percentiles per day)
+    pooled = []        # every block's fee value, for the pooled full-period percentiles
+    pooled_take = []   # every block's proposer take, same purpose
+    day_rewards = {}   # written day -> np.array of per-block fees (for windowed pooled pctiles)
+    day_takes = {}     # written day -> np.array of per-block take
     bidrows = []       # bid_winnable: (day, my_bid, winnable_blocks, max_wait_min, max_wait_hours)
     for day in sorted(days):
         vals = days[day]
         if day == latest_day and len(vals) < args.min_blocks:
             continue                      # current day still filling — hold back
         vals.sort()                       # by timestamp
-        ts = [t for t, _ in vals]
-        rewards = [r for _, r in vals]
+        ts = [t for t, _, _ in vals]
+        rewards = [r for _, r, _ in vals]
+        takes = [k for _, _, k in vals]
         pooled.extend(rewards)
+        pooled_take.extend(takes)
         day_rewards[day] = np.asarray(rewards)
-        a = np.array(rewards)
+        day_takes[day] = np.asarray(takes)
+        a, tk = np.array(rewards), np.array(takes)
         rows.append((
             day, len(a),
             float(np.percentile(a, 50)), float(np.percentile(a, 80)),
             float(np.percentile(a, 90)), float(np.percentile(a, 99)),
+            float(np.percentile(tk, 50)), float(np.percentile(tk, 80)),
+            float(np.percentile(tk, 90)), float(np.percentile(tk, 99)),
         ))
 
         # Bid & win: you "win" a block if your bid >= its value (reward <= bid).
@@ -129,62 +166,69 @@ def main():
 
     # 1) Write the daily_percentiles table into the cache DB (the site reads this
     #    via the server's /api/history endpoint — the primary path for option B).
-    conn.execute("""CREATE TABLE IF NOT EXISTS daily_percentiles (
-        day TEXT PRIMARY KEY, blocks INTEGER, p50 REAL, p80 REAL, p90 REAL, p99 REAL)""")
-    conn.execute("DELETE FROM daily_percentiles")
+    #    Both bases per day: fees (priority-fee sum) and take (proposer take).
+    conn.execute("DROP TABLE IF EXISTS daily_percentiles")    # schema gained take_* columns
+    conn.execute("""CREATE TABLE daily_percentiles (
+        day TEXT PRIMARY KEY, blocks INTEGER,
+        p50 REAL, p80 REAL, p90 REAL, p99 REAL,
+        take_p50 REAL, take_p80 REAL, take_p90 REAL, take_p99 REAL)""")
     conn.executemany(
-        "INSERT INTO daily_percentiles (day,blocks,p50,p80,p90,p99) VALUES (?,?,?,?,?,?)",
-        rows)
+        "INSERT INTO daily_percentiles "
+        "(day,blocks,p50,p80,p90,p99,take_p50,take_p80,take_p90,take_p99) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
 
-    # 1b) Pooled full-period percentiles over every block (a different statistic
-    #     from the daily values: the 90th percentile of the whole distribution).
+    # 1b) Pooled / windowed percentiles over every block (a different statistic from
+    #     the daily values). Computed symmetrically for both bases: the fee keys are
+    #     unprefixed (p90, p90_365d, hot_days, …) and the proposer-take keys carry a
+    #     "take_" prefix, so the front end can flip the whole dashboard between them.
     conn.execute("CREATE TABLE IF NOT EXISTS summary (key TEXT PRIMARY KEY, value REAL)")
     conn.execute("DELETE FROM summary")
     if pooled:
-        pa = np.array(pooled)
         summary = {
-            "blocks": float(len(pa)),
-            "p50": float(np.percentile(pa, 50)), "p80": float(np.percentile(pa, 80)),
-            "p90": float(np.percentile(pa, 90)), "p95": float(np.percentile(pa, 95)),
-            "p99": float(np.percentile(pa, 99)), "max": float(pa.max()),
+            "blocks": float(len(pooled)),
             "built_at": datetime.now(timezone.utc).timestamp(),   # last refresh time
         }
-
-        # Windowed pooled p90s: the true 90th percentile of every block in each
-        # trailing window (not an average of daily p90s), so they stay on the same
-        # footing as the full-period "everything" p90 above. Windows are anchored on
-        # the most recent qualifying day so the figures are deterministic.
         qual_days = sorted(day_rewards)            # ascending; same set as `rows`
         latest_year = qual_days[-1][:4]
-
-        def pooled_pct(day_list, q):
-            if not day_list:
-                return float("nan")
-            arr = np.concatenate([day_rewards[d] for d in day_list])
-            return float(np.percentile(arr, q))
-
-        summary["p90_7d"] = pooled_pct(qual_days[-7:], 90)
-        summary["p90_30d"] = pooled_pct(qual_days[-30:], 90)
-        summary["p90_90d"] = pooled_pct(qual_days[-90:], 90)
-        summary["p90_ytd"] = pooled_pct([d for d in qual_days if d[:4] == latest_year], 90)
-        # Rolling trailing year: the headline pricing anchor, and the single basis
-        # every headline figure shares. Always the most recent 365 days (fewer only
-        # until a full year of history exists), so it doesn't drift as the cache
-        # grows past a year.
         ry_days = qual_days[-365:]
-        summary["p50_365d"] = pooled_pct(ry_days, 50)
-        summary["p90_365d"] = pooled_pct(ry_days, 90)
-        summary["p99_365d"] = pooled_pct(ry_days, 99)
+        daily = {r[0]: r for r in rows}            # day -> row tuple (for the hot-day count)
 
-        # Hot days: days within the rolling year whose daily p90 is >= 1.5x the
-        # rolling-year pooled p90 (a "clearly elevated" regime, e.g. the late-April
-        # surge). rows[i] = (day, blocks, p50, p80, p90, p99) so daily p90 is idx 4.
-        daily_p90 = {r[0]: r[4] for r in rows}
-        hot_threshold = 1.5 * summary["p90_365d"]
-        summary["hot_threshold"] = hot_threshold
-        summary["hot_days"] = float(sum(1 for d in ry_days if daily_p90[d] >= hot_threshold))
-        summary["hot_total_days"] = float(len(ry_days))
-        summary["hot_peak"] = float(max((daily_p90[d] for d in ry_days), default=0.0))
+        # Build the full stat-set for one metric. `pooled_arr` is every block's value;
+        # `day_map` gives per-day arrays for the windowed pooled percentiles; `p90_col`
+        # is the index of that metric's daily p90 in the `rows` tuple (4 fees / 8 take).
+        def add_metric(prefix, pooled_arr, day_map, p90_col):
+            pa = np.array(pooled_arr)
+            summary[prefix + "p50"] = float(np.percentile(pa, 50))
+            summary[prefix + "p80"] = float(np.percentile(pa, 80))
+            summary[prefix + "p90"] = float(np.percentile(pa, 90))
+            summary[prefix + "p95"] = float(np.percentile(pa, 95))
+            summary[prefix + "p99"] = float(np.percentile(pa, 99))
+            summary[prefix + "max"] = float(pa.max())
+
+            def winp(day_list, q):                 # true pooled pct over a trailing window
+                if not day_list:
+                    return float("nan")
+                return float(np.percentile(np.concatenate([day_map[d] for d in day_list]), q))
+
+            summary[prefix + "p90_7d"]  = winp(qual_days[-7:], 90)
+            summary[prefix + "p90_30d"] = winp(qual_days[-30:], 90)
+            summary[prefix + "p90_90d"] = winp(qual_days[-90:], 90)
+            summary[prefix + "p90_ytd"] = winp([d for d in qual_days if d[:4] == latest_year], 90)
+            # Rolling trailing year — the headline anchor every figure shares.
+            summary[prefix + "p50_365d"] = winp(ry_days, 50)
+            summary[prefix + "p90_365d"] = winp(ry_days, 90)
+            summary[prefix + "p99_365d"] = winp(ry_days, 99)
+
+            # Hot days: days in the rolling year whose daily p90 >= 1.5x the
+            # rolling-year pooled p90 (for this metric's basis).
+            thr = 1.5 * summary[prefix + "p90_365d"]
+            summary[prefix + "hot_threshold"] = thr
+            summary[prefix + "hot_days"] = float(sum(1 for d in ry_days if daily[d][p90_col] >= thr))
+            summary[prefix + "hot_total_days"] = float(len(ry_days))
+            summary[prefix + "hot_peak"] = float(max((daily[d][p90_col] for d in ry_days), default=0.0))
+
+        add_metric("", pooled, day_rewards, 4)          # fees: daily p90 is rows[4]
+        add_metric("take_", pooled_take, day_takes, 8)  # take: daily take_p90 is rows[8]
 
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
 
@@ -200,9 +244,9 @@ def main():
 
     # 2) Also write the CSVs (fallback if the API/DB is unavailable).
     with open(args.out, "w") as f:
-        f.write("day,blocks,p50,p80,p90,p99\n")
-        for day, blocks, p50, p80, p90, p99 in rows:
-            f.write(f"{day} 00:00:00.000 UTC,{blocks},{p50},{p80},{p90},{p99}\n")
+        f.write("day,blocks,p50,p80,p90,p99,take_p50,take_p80,take_p90,take_p99\n")
+        for r in rows:
+            f.write(f"{r[0]} 00:00:00.000 UTC," + ",".join(str(x) for x in r[1:]) + "\n")
     with open(os.path.join(BASE, "blockspace_max_wait.csv"), "w") as f:
         f.write("day,my_bid,winnable_blocks,max_wait_min,max_wait_hours\n")
         for day, bid, nwin, wmin, whr in bidrows:

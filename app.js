@@ -25,7 +25,8 @@ const STATE = {
   bidWinDaily: [],
   live: [],                 // newest first (from /api/live/recent)
   liveHead: 0,
-  metric: "take",           // "take" (proposer/Dune CASE) | "fees" (priority-fee sum)
+  metric: "take",           // Live tab: "take" (proposer/Dune CASE) | "fees" (priority-fee sum)
+  hmetric: "fees",          // history tabs (Overview/Block value): "fees" | "take" (proposer take)
   bvSortKey: "day",  bvSortDir: "desc", bvSearch: "",
   bwSortKey: "my_bid", bwSortDir: "asc",
   gas: null,                // latest /api/gas (Search tab)
@@ -85,7 +86,11 @@ const csvDay = s => String(s).split(" ")[0];   // "2024-06-15 00:00:00.000 UTC" 
 // Daily block-value percentiles. Primary source is the server API backed by the
 // cache DB (/api/history); falls back to the static CSV if the API is empty/down.
 async function loadBlockValueDaily() {
-  const shape = r => ({ day: csvDay(r.day), blocks: +r.blocks, p50: +r.p50, p80: +r.p80, p90: +r.p90, p99: +r.p99 });
+  const shape = r => ({
+    day: csvDay(r.day), blocks: +r.blocks,
+    p50: +r.p50, p80: +r.p80, p90: +r.p90, p99: +r.p99,
+    take_p50: +r.take_p50, take_p80: +r.take_p80, take_p90: +r.take_p90, take_p99: +r.take_p99,
+  });
   const finalize = arr => arr.filter(r => r.day && isFinite(r.p50)).sort((a, b) => a.day < b.day ? -1 : 1);
   try {
     const res = await fetch("/api/history");
@@ -169,6 +174,27 @@ function windowDays() {
   const n = WINDOW_DAYS[STATE.window];
   return STATE.blockValueDaily.slice(-n);
 }
+
+// ----- history-metric accessors (fees | proposer take) ------
+// Resolve a daily row's percentile (base = "p50"/"p80"/"p90"/"p99") or a pooled
+// summary key to the active metric, falling back to fees when take data is absent
+// (e.g. a CSV without take columns, or before the proposer-take re-pull lands).
+const fin = (x, fallback) => isFinite(x) ? x : fallback;   // value or fallback when NaN/missing
+const HMETRIC_LABEL = () => STATE.hmetric === "take" ? "proposer take" : "priority fees";
+const hmPick = (row, base) => {
+  if (STATE.hmetric === "take") { const v = row["take_" + base]; if (isFinite(v)) return v; }
+  return row[base];
+};
+const hmP = (P, key) => {
+  if (STATE.hmetric === "take") { const v = P["take_" + key]; if (isFinite(v)) return v; }
+  return P[key];
+};
+// windowDays() with p50/p80/p90/p99 resolved to the active metric (for charts/tables).
+function metricDays() {
+  const d = windowDays();
+  if (STATE.hmetric !== "take") return d;
+  return d.map(r => ({ ...r, p50: hmPick(r, "p50"), p80: hmPick(r, "p80"), p90: hmPick(r, "p90"), p99: hmPick(r, "p99") }));
+}
 function bidAggregates() {
   const days = windowDays();
   const daySet = new Set(days.map(d => d.day));
@@ -207,42 +233,42 @@ function renderOverview() {
 
   const heroStamp = document.getElementById("hero-stamp");
   heroStamp.innerHTML =
-    `<span class="mono">${dateShort(latest.day)}</span> · latest day · window <span class="mono">${STATE.window}</span> · <span class="mono">${days.length}</span> days${refreshStamp()}`;
+    `<span class="mono">${dateShort(latest.day)}</span> · latest day · ${HMETRIC_LABEL()} · window <span class="mono">${STATE.window}</span> · <span class="mono">${days.length}</span> days${refreshStamp()}`;
   heroStamp.classList.toggle("stale", dataIsStale());
 
-  // Pooled / windowed figures. Prefer the server's true pooled percentiles
-  // (90th pct of every block in the window); fall back to an average of daily
-  // p90s only when running off the static CSV (no /api/history summary).
+  // Pooled / windowed figures, resolved to the active metric (fees | take). Prefer
+  // the server's true pooled percentiles; fall back to an average of daily values
+  // only when running off the static CSV (no /api/history summary).
   const P = STATE.pooled || {};
-  const fin = (x, fallback) => isFinite(x) ? x : fallback;
   const year = latest.day.slice(0, 4);
   const ytdDays = bv.filter(d => d.day.slice(0, 4) === year);
-  const p90_7d  = fin(P.p90_7d,  avg(bv.slice(-7).map(d => d.p90)));
-  const p90_30d = fin(P.p90_30d, avg(bv.slice(-30).map(d => d.p90)));
-  const p90_90d = fin(P.p90_90d, avg(bv.slice(-90).map(d => d.p90)));
-  const p90_ytd = fin(P.p90_ytd, avg(ytdDays.map(d => d.p90)));
-  const p50_1yr = fin(P.p50_365d, avg(bv.slice(-365).map(d => d.p50)));   // rolling trailing year
-  const p90_1yr = fin(P.p90_365d, avg(bv.slice(-365).map(d => d.p90)));
-  const p99_1yr = fin(P.p99_365d, avg(bv.slice(-365).map(d => d.p99)));
-  const hotThresh = fin(P.hot_threshold, 1.5 * p90_1yr);
-  const hotDays   = fin(P.hot_days, bv.slice(-365).filter(d => d.p90 >= hotThresh).length);
-  const hotTotal  = fin(P.hot_total_days, Math.min(bv.length, 365));
+  const p90_7d  = fin(hmP(P, "p90_7d"),  avg(bv.slice(-7).map(d => hmPick(d, "p90"))));
+  const p90_30d = fin(hmP(P, "p90_30d"), avg(bv.slice(-30).map(d => hmPick(d, "p90"))));
+  const p90_90d = fin(hmP(P, "p90_90d"), avg(bv.slice(-90).map(d => hmPick(d, "p90"))));
+  const p90_ytd = fin(hmP(P, "p90_ytd"), avg(ytdDays.map(d => hmPick(d, "p90"))));
+  const p50_1yr = fin(hmP(P, "p50_365d"), avg(bv.slice(-365).map(d => hmPick(d, "p50"))));   // rolling trailing year
+  const p90_1yr = fin(hmP(P, "p90_365d"), avg(bv.slice(-365).map(d => hmPick(d, "p90"))));
+  const p99_1yr = fin(hmP(P, "p99_365d"), avg(bv.slice(-365).map(d => hmPick(d, "p99"))));
+  const hotThresh = fin(hmP(P, "hot_threshold"), 1.5 * p90_1yr);
+  const hotDays   = fin(hmP(P, "hot_days"), bv.slice(-365).filter(d => hmPick(d, "p90") >= hotThresh).length);
+  const hotTotal  = fin(hmP(P, "hot_total_days"), Math.min(bv.length, 365));
+  const lp50 = hmPick(latest, "p50"), lp90 = hmPick(latest, "p90"), lp99 = hmPick(latest, "p99");
 
   // Two logical rows (12 tiles keeps every breakpoint's grid full):
   //  Row 1 — p90 across every horizon, short → long (the pricing ladder).
   //  Row 2 — the rest of the distribution (median, tail) latest vs rolling-year,
   //          plus volume and hot-day activity.
   const tiles = [
-    { label: "p90 · latest", value: ethF(latest.p90), foot: "latest day", cls: "neutral" },
+    { label: "p90 · latest", value: ethF(lp90), foot: "latest day", cls: "neutral" },
     { label: "p90 · 7d", value: ethF(p90_7d), foot: "trailing week", cls: "neutral" },
     { label: "p90 · 30d", value: ethF(p90_30d), foot: "trailing month", cls: "neutral" },
     { label: "p90 · 90d", value: ethF(p90_90d), foot: "trailing 90 days", cls: "neutral" },
     { label: "p90 · YTD", value: ethF(p90_ytd), foot: `${year} to date`, cls: "neutral" },
     { label: "p90 · 1yr", value: ethF(p90_1yr), foot: "rolling 365 days", cls: "neutral" },
 
-    { label: "Median · latest", value: ethF(latest.p50), foot: "p50 · latest day", cls: "neutral" },
+    { label: "Median · latest", value: ethF(lp50), foot: "p50 · latest day", cls: "neutral" },
     { label: "Median · 1yr", value: ethF(p50_1yr), foot: "p50 · rolling 365 days", cls: "neutral" },
-    { label: "Tail · latest", value: ethF(latest.p99), foot: "p99 · latest day", cls: "neutral" },
+    { label: "Tail · latest", value: ethF(lp99), foot: "p99 · latest day", cls: "neutral" },
     { label: "Tail · 1yr", value: ethF(p99_1yr), foot: "p99 · rolling 365 days", cls: "neutral" },
     { label: "Blocks / day", value: numF(latest.blocks), foot: "latest · ~12s cadence", cls: "neutral" },
     { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · list all →`, cls: hotDays > 0 ? "neg" : "neutral", href: "#hot-days" },
@@ -258,13 +284,13 @@ function renderOverview() {
   }).join("");
 
   buildFanChart("ov-fan", {
-    dates: days.map(d => d.day), p50: days.map(d => d.p50), p90: days.map(d => d.p90), p99: days.map(d => d.p99),
+    dates: days.map(d => d.day), p50: days.map(d => hmPick(d, "p50")), p90: days.map(d => hmPick(d, "p90")), p99: days.map(d => hmPick(d, "p99")),
     log: true, tooltipId: "ov-fan-tt",
   });
   // The regime calendar is always the rolling year — it's a long-horizon view, so
   // it ignores the window switch (a 7d/30d calendar would be sparse and the colour
   // scale would recalibrate to a meaningless range).
-  buildCalendarHeatmap("ov-cal", bv.slice(-365), d => d.p90, "ov-cal-tt");
+  buildCalendarHeatmap("ov-cal", bv.slice(-365), d => hmPick(d, "p90"), "ov-cal-tt");
 }
 
 // ----- Hot days (drill-down from the Overview KPI) ----------
@@ -276,13 +302,13 @@ function renderHotDays() {
   if (!bv.length) return;
   const P = STATE.pooled || {};
   const ry = bv.slice(-365);                                   // rolling year
-  const pooledP90 = isFinite(P.p90_365d) ? P.p90_365d : avg(ry.map(d => d.p90));
-  const thresh = isFinite(P.hot_threshold) ? P.hot_threshold : 1.5 * pooledP90;
-  const hot = ry.filter(d => d.p90 >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
+  const pooledP90 = fin(hmP(P, "p90_365d"), avg(ry.map(d => hmPick(d, "p90"))));
+  const thresh = fin(hmP(P, "hot_threshold"), 1.5 * pooledP90);
+  const hot = ry.filter(d => hmPick(d, "p90") >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
 
   const hotDeck = document.getElementById("hot-deck");
   hotDeck.innerHTML =
-    `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(ry.length)}</span> days · rolling year · ` +
+    `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(ry.length)}</span> days · rolling year · ${HMETRIC_LABEL()} · ` +
     `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× rolling-year pooled <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
   hotDeck.classList.toggle("stale", dataIsStale());
 
@@ -291,10 +317,10 @@ function renderHotDays() {
   </tr></thead>`;
   const body = hot.map(d => `<tr>
     <td>${dateShort(d.day)}</td>
-    <td class="accent">${ethF(d.p90)}</td>
-    <td>${(d.p90 / pooledP90).toFixed(1)}×</td>
-    <td>${ethF(d.p50)}</td>
-    <td>${ethF(d.p99)}</td>
+    <td class="accent">${ethF(hmPick(d, "p90"))}</td>
+    <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
+    <td>${ethF(hmPick(d, "p50"))}</td>
+    <td>${ethF(hmPick(d, "p99"))}</td>
     <td>${numF(d.blocks)}</td>
   </tr>`).join("");
   document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
@@ -303,7 +329,7 @@ function renderHotDays() {
 
 // ----- Block value (Q1) -------------------------------------
 function renderBlockValue() {
-  const days = windowDays();
+  const days = metricDays();
   const dates = days.map(d => d.day);
 
   const span = STATE.window === "1yr" ? 7 : STATE.window === "90d" ? 5 : STATE.window === "30d" ? 3 : 1;
@@ -327,7 +353,7 @@ function renderBlockValue() {
   const lo = days[0], hi = days[days.length - 1];
   const bvDeck = document.getElementById("bv-deck");
   bvDeck.innerHTML =
-    `${dateShort(lo.day)} → ${dateShort(hi.day)} · ${days.length} days · proposer take${span > 1 ? ` · ${span}-day avg` : ""}${refreshStamp()}`;
+    `${dateShort(lo.day)} → ${dateShort(hi.day)} · ${days.length} days · ${HMETRIC_LABEL()}${span > 1 ? ` · ${span}-day avg` : ""}${refreshStamp()}`;
   bvDeck.classList.toggle("stale", dataIsStale());
 
   renderBvTable();
@@ -341,7 +367,7 @@ function renderBvTable() {
     { key: "p90", label: "p90 · ETH", fmt: ethF, accent: true },
     { key: "p99", label: "p99 · ETH", fmt: ethF },
   ];
-  let rows = [...windowDays()];
+  let rows = [...metricDays()];
   const term = STATE.bvSearch.trim().toLowerCase();
   if (term) rows = rows.filter(r => r.day.includes(term) || dateShort(r.day).toLowerCase().includes(term));
   const dir = STATE.bvSortDir === "asc" ? 1 : -1;
@@ -995,6 +1021,18 @@ function wireMetric() {
     if (STATE.tab === "live") renderLive();
   }));
 }
+// History value basis (fees | proposer take) — drives Overview + Block value.
+// Both tabs share one #STATE.hmetric, so the two toggles stay in sync.
+function wireHistMetric() {
+  const sync = () => document.querySelectorAll(".hist-metric button")
+    .forEach(b => b.classList.toggle("active", b.dataset.hmetric === STATE.hmetric));
+  document.querySelectorAll(".hist-metric button").forEach(b => b.addEventListener("click", () => {
+    STATE.hmetric = b.dataset.hmetric;
+    sync();
+    renderActiveTab();
+  }));
+  sync();
+}
 function wireLookup() {
   const input = document.getElementById("lookup-input");
   if (!input) return;
@@ -1081,6 +1119,7 @@ async function boot() {
   wireWindow();
   wireTabs();
   wireMetric();
+  wireHistMetric();
   wireLookup();
   wireSearch();
   let _rz; window.addEventListener("resize", () => { clearTimeout(_rz); _rz = setTimeout(renderActiveTab, 200); });
