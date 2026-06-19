@@ -190,7 +190,13 @@ def _cache_put(table: str, columns: str, placeholders: str, params: tuple):
 
 # Per-transaction fields needed by the reward calc (exact + approximate modes).
 _TX_KEEP      = ("hash", "gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas")
-_BLOCK_KEEP   = ("number", "timestamp", "baseFeePerGas")
+# Block header fields. `miner` (the block fee recipient / builder address) and
+# `extraData` (builder label) are kept for the proposer-take calculation.
+_BLOCK_KEEP   = ("number", "timestamp", "baseFeePerGas", "miner", "extraData")
+# Extra fields kept for the FINAL transaction only — the builder→proposer payment
+# in an MEV-Boost block — so build_history can compute the proposer take without
+# storing every tx's value/calldata (which is what makes the cache big).
+_TX_LAST_KEEP = ("to", "value", "input")
 _RECEIPT_KEEP = ("transactionHash", "gasUsed", "effectiveGasPrice")
 
 
@@ -199,12 +205,18 @@ def _slim_block(block):
     if not isinstance(block, dict):
         return block
     slim = {k: block[k] for k in _BLOCK_KEEP if k in block}
+    raw = block.get("transactions", [])
     txs = []
-    for tx in block.get("transactions", []):
+    for i, tx in enumerate(raw):
         if isinstance(tx, str):
             txs.append(tx)                       # hash-only block (full=False)
         else:
-            txs.append({k: tx[k] for k in _TX_KEEP if k in tx})
+            d = {k: tx[k] for k in _TX_KEEP if k in tx}
+            if i == len(raw) - 1:                # final tx → proposer-take fields
+                for k in _TX_LAST_KEEP:
+                    if k in tx:
+                        d[k] = tx[k]
+            txs.append(d)
     slim["transactions"] = txs
     return slim
 
@@ -261,9 +273,12 @@ def get_block(number: int, full_txns: bool = True):
     global cache_hits, cache_misses
     full_flag = 1 if full_txns else 0
 
-    # 1) Exact match in cache?
+    # 1) Exact match in cache? Pre-enrichment full blocks (cached before the
+    #    proposer-take fields existed, detected by a missing `extraData`) are
+    #    treated as a miss so a `--complete` run re-fetches and enriches them.
     cached, found = _cache_get("blocks", "number = ? AND full = ?", (number, full_flag))
-    if found:
+    stale = full_flag == 1 and isinstance(cached, dict) and "extraData" not in cached
+    if found and not stale:
         cache_hits += 1
         return cached
 
