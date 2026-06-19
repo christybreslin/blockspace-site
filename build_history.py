@@ -172,8 +172,9 @@ def main():
         # until a full year of history exists), so it doesn't drift as the cache
         # grows past a year.
         ry_days = qual_days[-365:]
-        summary["p90_365d"] = pooled_pct(ry_days, 90)
         summary["p50_365d"] = pooled_pct(ry_days, 50)
+        summary["p90_365d"] = pooled_pct(ry_days, 90)
+        summary["p99_365d"] = pooled_pct(ry_days, 99)
 
         # Hot days: days within the rolling year whose daily p90 is >= 1.5x the
         # rolling-year pooled p90 (a "clearly elevated" regime, e.g. the late-April
