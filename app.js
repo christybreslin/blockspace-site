@@ -261,7 +261,10 @@ function renderOverview() {
     dates: days.map(d => d.day), p50: days.map(d => d.p50), p90: days.map(d => d.p90), p99: days.map(d => d.p99),
     log: true, tooltipId: "ov-fan-tt",
   });
-  buildCalendarHeatmap("ov-cal", days, d => d.p90, "ov-cal-tt");
+  // The regime calendar is always the rolling year — it's a long-horizon view, so
+  // it ignores the window switch (a 7d/30d calendar would be sparse and the colour
+  // scale would recalibrate to a meaningless range).
+  buildCalendarHeatmap("ov-cal", bv.slice(-365), d => d.p90, "ov-cal-tt");
 }
 
 // ----- Hot days (drill-down from the Overview KPI) ----------
