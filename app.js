@@ -1008,9 +1008,12 @@ function initTheme() {
 }
 function wireTheme() { document.querySelector(".theme-toggle").addEventListener("click", () => applyTheme(STATE.theme === "dark" ? "light" : "dark")); }
 function wireWindow() {
-  document.querySelectorAll(".window-switch button").forEach(b => b.addEventListener("click", () => {
+  // Scope to buttons that actually carry data-window — the hist-metric toggle
+  // reuses the .window-switch style class, so a bare ".window-switch button"
+  // selector would clobber its active state (and vice versa).
+  document.querySelectorAll("button[data-window]").forEach(b => b.addEventListener("click", () => {
     STATE.window = b.dataset.window;
-    document.querySelectorAll(".window-switch button").forEach(x => x.classList.toggle("active", x.dataset.window === STATE.window));
+    document.querySelectorAll("button[data-window]").forEach(x => x.classList.toggle("active", x.dataset.window === STATE.window));
     renderAll();
   }));
 }
