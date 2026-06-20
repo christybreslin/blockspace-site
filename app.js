@@ -180,7 +180,7 @@ function windowDays() {
 // summary key to the active metric, falling back to fees when take data is absent
 // (e.g. a CSV without take columns, or before the proposer-take re-pull lands).
 const fin = (x, fallback) => isFinite(x) ? x : fallback;   // value or fallback when NaN/missing
-const HMETRIC_LABEL = () => STATE.hmetric === "take" ? "proposer take" : "priority fees";
+const HMETRIC_LABEL = () => STATE.hmetric === "take" ? "validator reward" : "priority fees";
 const hmPick = (row, base) => {
   if (STATE.hmetric === "take") { const v = row["take_" + base]; if (isFinite(v)) return v; }
   return row[base];
@@ -470,7 +470,7 @@ function renderBwTable(aggs) {
 }
 
 // ----- Live -------------------------------------------------
-const METRIC_LABEL = () => STATE.metric === "fees" ? "priority fees" : "proposer take";
+const METRIC_LABEL = () => STATE.metric === "fees" ? "priority fees" : "validator reward";
 
 function renderLive() {
   // metric toggle active state (present even before data)
@@ -540,7 +540,7 @@ function lookupCardHTML(kicker, ident, rows) {
 }
 function blockCardHTML(b) {
   const rows = [
-    ["Proposer take", ethF(b.reward_take) + " ETH", b.branch === "mev"],
+    ["Validator reward", ethF(b.reward_take) + " ETH", b.branch === "mev"],
     ["Priority fees", ethF(b.reward_fees) + " ETH", b.branch === "fees"],
     ["Builder", escapeHtml(b.builder), false],
     ["Branch", b.branch === "mev" ? "MEV-Boost payment" : "priority-fee sum", false],
