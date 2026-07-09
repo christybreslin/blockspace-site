@@ -1,0 +1,15 @@
+[Unit]
+Description=Blockspace Sepolia census cache catch-up
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Set these to your checkout path:
+WorkingDirectory=/opt/blockspace-site
+EnvironmentFile=/etc/blockspace/env
+ExecStart=/opt/blockspace-site/deploy/refresh-sepolia.sh
+# The Sepolia dev endpoint is heavily rate-limited, so a catch-up run can be slow.
+# Disable the start timeout (default ~90s for oneshot) so systemd never kills a
+# legitimately long refresh mid-run.
+TimeoutStartSec=0
