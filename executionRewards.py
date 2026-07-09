@@ -51,30 +51,127 @@ _ENV = _load_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"
 def _cfg(key, default=None):
     return os.environ.get(key) or _ENV.get(key) or default
 
-RPC_URL    = _cfg("EL_RPC_URL") or _cfg("RPC_URL") or "https://mainnet-user-el.attestant.io"
-_token     = _cfg("EL_RPC_TOKEN") or _cfg("RPC_TOKEN") or ""
-RPC_HEADERS = {"Authorization": f"Bearer {_token}"} if _token else {}
-RPC_AUTH   = None
-RPC_VERIFY = not ((_cfg("INSECURE") == "1") or (_cfg("RPC_VERIFY", "true").lower() == "false"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Optional credentials.py fallback for local dev (gitignored, never committed).
-try:
-    import credentials as _creds
-    RPC_URL = getattr(_creds, "RPC_URL", "") or RPC_URL
-    if hasattr(_creds, "RPC_VERIFY"):
-        RPC_VERIFY = _creds.RPC_VERIFY
-    if not _token and getattr(_creds, "RPC_TOKEN", ""):
-        RPC_HEADERS = {"Authorization": f"Bearer {_creds.RPC_TOKEN}"}
-    elif not _token and getattr(_creds, "RPC_USERNAME", ""):
-        RPC_AUTH = (_creds.RPC_USERNAME, _creds.RPC_PASSWORD)
-except ImportError:
-    pass
+# Per-network defaults. Each network has its own RPC endpoint, its own SQLite
+# cache (historical block data differs entirely between chains, so the caches
+# must never be mixed), and its own block explorer for spot-checks. `env_prefix`
+# is prepended to the .env / credentials keys, so Sepolia settings can be given
+# as SEPOLIA_EL_RPC_URL, SEPOLIA_EL_RPC_TOKEN, SEPOLIA_WORKERS, etc.; anything
+# not given there falls back to the shared (unprefixed) key or the default below.
+_NETWORK_DEFAULTS = {
+    "mainnet": {
+        "rpc_url":    "https://mainnet-user-el.attestant.io",
+        "cache_db":   "blocks_cache.sqlite",
+        "explorer":   "https://etherscan.io/block/",
+        "env_prefix": "",
+        # Proposer's own node (no rate limit): push hard, no inter-call delay.
+        "workers":    8,
+        "sleep_ms":   0,
+    },
+    "sepolia": {
+        "rpc_url":    "https://sepolia-execution.attestant.io",
+        "cache_db":   "blocks_cache_sepolia.sqlite",
+        "explorer":   "https://sepolia.etherscan.io/block/",
+        "env_prefix": "SEPOLIA_",
+        # Aggressively rate-limited dev endpoint: run serially (a single worker,
+        # no concurrent bursts) with a small delay. Raise on an unthrottled
+        # endpoint via --workers / --sleep-ms or SEPOLIA_WORKERS / SEPOLIA_SLEEP_MS.
+        "workers":    1,
+        "sleep_ms":   100,
+    },
+}
 
-# The endpoint uses a self-signed cert; if verification is disabled, silence the
-# noisy per-request InsecureRequestWarning.
-if RPC_VERIFY is False:
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Selected network and its resolved settings. Populated by _configure_network(),
+# called once at import (mainnet default) and again from __main__ if a different
+# network is requested on the command line.
+NETWORK      = "mainnet"
+RPC_URL      = _NETWORK_DEFAULTS["mainnet"]["rpc_url"]
+EXPLORER_URL = _NETWORK_DEFAULTS["mainnet"]["explorer"]
+CACHE_DB     = os.path.join(_HERE, _NETWORK_DEFAULTS["mainnet"]["cache_db"])
+RPC_HEADERS  = {}
+RPC_AUTH     = None
+RPC_VERIFY   = True
+
+
+def _configure_network(network: str):
+    """Point the analyser at the given network's endpoint, cache and explorer.
+
+    Config resolves from the process environment / .env first (as server.py
+    does), then a credentials.py fallback for local dev. For a network with
+    env_prefix P, P-prefixed keys win (e.g. SEPOLIA_EL_RPC_TOKEN); auth/verify
+    then fall back to the shared unprefixed keys, so a single bearer token works
+    across networks. The RPC URL falls back to the shared key only for mainnet;
+    other networks fall back to their baked-in default rather than silently
+    pointing at the mainnet endpoint.
+    """
+    global NETWORK, RPC_URL, EXPLORER_URL, CACHE_DB, RPC_HEADERS, RPC_AUTH, RPC_VERIFY
+    global WORKERS, SLEEP_MS
+
+    if network not in _NETWORK_DEFAULTS:
+        raise ValueError(
+            f"Unknown network '{network}'. Choose from: "
+            f"{', '.join(_NETWORK_DEFAULTS)}")
+
+    d = _NETWORK_DEFAULTS[network]
+    p = d["env_prefix"]
+    NETWORK      = network
+    EXPLORER_URL = d["explorer"]
+    CACHE_DB     = os.path.join(_HERE, d["cache_db"])
+    RPC_AUTH     = None
+
+    # URL: prefixed .env first; for mainnet also the shared key; else the default.
+    RPC_URL = _cfg(p + "EL_RPC_URL") or _cfg(p + "RPC_URL")
+    if not RPC_URL and network == "mainnet":
+        RPC_URL = _cfg("EL_RPC_URL") or _cfg("RPC_URL")
+    RPC_URL = RPC_URL or d["rpc_url"]
+
+    # Token: prefixed .env first, then the shared token (works across networks).
+    _token = (_cfg(p + "EL_RPC_TOKEN") or _cfg(p + "RPC_TOKEN")
+              or _cfg("EL_RPC_TOKEN") or _cfg("RPC_TOKEN") or "")
+    RPC_HEADERS = {"Authorization": f"Bearer {_token}"} if _token else {}
+
+    # Verify: prefixed INSECURE / RPC_VERIFY, then shared.
+    _insecure = _cfg(p + "INSECURE") or _cfg("INSECURE")
+    _verify_s = _cfg(p + "RPC_VERIFY") or _cfg("RPC_VERIFY", "true")
+    RPC_VERIFY = not ((_insecure == "1") or (str(_verify_s).lower() == "false"))
+
+    # Throughput tuning: prefixed .env override, else the per-network default.
+    WORKERS  = int(_cfg(p + "WORKERS")  or d["workers"])
+    SLEEP_MS = int(_cfg(p + "SLEEP_MS") or d["sleep_ms"])
+
+    # Optional credentials.py fallback for local dev (gitignored, never committed).
+    try:
+        import credentials as _creds
+    except ImportError:
+        _creds = None
+    if _creds is not None:
+        def _cred(name):
+            v = getattr(_creds, p + name, None)
+            if v is None:
+                v = getattr(_creds, name, None)
+            return v
+        _cred_url = getattr(_creds, p + "RPC_URL", None)
+        if _cred_url is None and network == "mainnet":
+            _cred_url = getattr(_creds, "RPC_URL", None)
+        if _cred_url:
+            RPC_URL = _cred_url
+        if _cred("RPC_VERIFY") is not None:
+            RPC_VERIFY = _cred("RPC_VERIFY")
+        if not _token and _cred("RPC_TOKEN"):
+            RPC_HEADERS = {"Authorization": f"Bearer {_cred('RPC_TOKEN')}"}
+        elif not _token and _cred("RPC_USERNAME"):
+            RPC_AUTH = (_cred("RPC_USERNAME"), _cred("RPC_PASSWORD"))
+
+    # The endpoint uses a self-signed cert; if verification is disabled, silence
+    # the noisy per-request InsecureRequestWarning.
+    if RPC_VERIFY is False:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+# Resolve mainnet settings at import so existing (mainnet) behaviour is unchanged.
+_configure_network("mainnet")
 
 # Shared, connection-pooled HTTP session so concurrent workers reuse keep-alive
 # connections instead of opening a new socket per call.
@@ -94,12 +191,12 @@ N_SAMPLES   = 500          # number of blocks to sample across the range
 COMPLETE    = False        # if True, fetch EVERY block in the range (no sampling)
 SAMPLE_RANDOM = False      # if True, sample N blocks at random (else even grid)
 REVERSE     = False        # if True, fetch newest block first (backward fill)
-WORKERS     = 8            # concurrent blocks fetched at once (1 = serial)
 TIMEOUT     = 30           # seconds per RPC call
-SLEEP_MS    = 0            # ms delay between live calls (0 = none; endpoint unthrottled)
 MAX_RETRIES = 8            # retries on rate-limit / transient errors
 BACKOFF_BASE = 1.0         # seconds; exponential backoff on HTTP 429
-CACHE_DB    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blocks_cache.sqlite")
+# WORKERS, SLEEP_MS and CACHE_DB are resolved per-network by _configure_network()
+# (see CONFIG section): mainnet pushes hard, Sepolia runs gently, each with its
+# own cache file. Override workers/sleep with --workers / --sleep-ms.
 
 # ─── LOCAL CACHE ────────────────────────────────────────────────────────────────
 # Historical block data is immutable, so we persist every RPC response to a local
@@ -452,6 +549,7 @@ def analyze_from_cache(start_ts: int, end_ts: int):
     print("=" * 60)
     print("Ethereum Execution Layer Reward Analyser — CACHE-ONLY MODE")
     print("=" * 60)
+    print(f"Network: {NETWORK}")
     print(f"Cache:  {CACHE_DB}")
     print(f"Period: {datetime.fromtimestamp(start_ts, tz=timezone.utc)} → "
           f"{datetime.fromtimestamp(end_ts, tz=timezone.utc)}")
@@ -478,6 +576,7 @@ def main():
     print("=" * 60)
     print("Ethereum Execution Layer Reward Analyser")
     print("=" * 60)
+    print(f"Network: {NETWORK}")
     print(f"RPC:    {RPC_URL}")
     print(f"Period: {datetime.fromtimestamp(START_TS, tz=timezone.utc).date()} → "
           f"{datetime.fromtimestamp(END_TS, tz=timezone.utc).date()}")
@@ -566,7 +665,7 @@ def main():
     # Fetch many blocks concurrently. The endpoint is the proposer's own node (no
     # rate limit), so throughput scales with worker count; cache writes are
     # serialised by _db_lock and the HTTP session pools connections.
-    print(f"  ({WORKERS} concurrent workers)")
+    print(f"  ({WORKERS} concurrent worker{'s' if WORKERS != 1 else ''})")
     with ThreadPoolExecutor(max_workers=max(1, WORKERS)) as ex:
         futs = {ex.submit(_reward_for, b): b for b in sampled_blocks}
         for fut in tqdm(as_completed(futs), total=len(futs), unit="block"):
@@ -604,7 +703,7 @@ def main():
         bn = sampled_blocks[i]
         if i < len(rewards_eth):
             r = rewards_eth[i] if i >= 0 else rewards_eth[i]
-            print(f"  Block {bn:,}:  {r:.6f} ETH  → https://etherscan.io/block/{bn}")
+            print(f"  Block {bn:,}:  {r:.6f} ETH  → {EXPLORER_URL}{bn}")
 
 
 def _parse_date(s: str) -> int:
@@ -619,6 +718,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(
         description="Ethereum execution-layer reward analyser.")
+    parser.add_argument(
+        "--network", choices=sorted(_NETWORK_DEFAULTS), default="mainnet",
+        help="Which network to analyse (default: mainnet). Each network uses its "
+             "own RPC endpoint and its own SQLite cache.")
+    parser.add_argument(
+        "--sepolia", action="store_true",
+        help="Shorthand for --network sepolia.")
     parser.add_argument(
         "--from-cache", nargs=2, metavar=("START", "END"),
         help="Compute stats from already-cached blocks in [START, END] "
@@ -644,8 +750,17 @@ if __name__ == "__main__":
                         help="Fetch newest block first (backward fill), so partial "
                              "progress is a contiguous recent window.")
     parser.add_argument("--workers", type=int, metavar="N",
-                        help="Concurrent blocks to fetch at once (default 8).")
+                        help="Concurrent blocks to fetch at once (overrides the "
+                             "per-network default: mainnet 8, Sepolia 1).")
+    parser.add_argument("--sleep-ms", type=int, metavar="MS",
+                        help="Delay between live RPC calls in ms (overrides the "
+                             "per-network default: mainnet 0, Sepolia 100).")
     args = parser.parse_args()
+
+    # Select the network first: repoints RPC_URL, CACHE_DB, EXPLORER_URL and the
+    # workers/sleep defaults (and re-reads network-specific credentials) before
+    # any mode runs, so live and cache-only paths use the right endpoint and DB.
+    _configure_network("sepolia" if args.sepolia else args.network)
 
     if args.cache_hours:
         end = int(datetime.now(timezone.utc).timestamp())
@@ -676,4 +791,6 @@ if __name__ == "__main__":
             REVERSE = True
         if args.workers:
             WORKERS = args.workers
+        if args.sleep_ms is not None:
+            SLEEP_MS = args.sleep_ms
         main()
