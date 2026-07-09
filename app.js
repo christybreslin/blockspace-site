@@ -19,6 +19,7 @@ const LIVE_ROLL = 50;        // rolling-stat window
 
 const STATE = {
   window: "1yr",
+  network: "mainnet",       // DB-backed views: "mainnet" | "sepolia" (nav toggle)
   bid: 0.25,
   theme: "light",
   blockValueDaily: [],
@@ -83,6 +84,13 @@ function parseCsv(text) {
 }
 const csvDay = s => String(s).split(" ")[0];   // "2024-06-15 00:00:00.000 UTC" -> "2024-06-15"
 
+// Network selection for the DB-backed views (Overview / Block value / Bid & win).
+// Mainnet keeps the original URLs/filenames; other networks add ?network= and a
+// filename suffix, matching build_history.py's per-network outputs.
+const NET = () => STATE.network || "mainnet";
+const netQ = () => NET() === "mainnet" ? "" : "?network=" + encodeURIComponent(NET());
+const netCsv = base => NET() === "mainnet" ? base : base.replace(/\.csv$/, "_" + NET() + ".csv");
+
 // Daily block-value percentiles. Primary source is the server API backed by the
 // cache DB (/api/history); falls back to the static CSV if the API is empty/down.
 async function loadBlockValueDaily() {
@@ -93,17 +101,22 @@ async function loadBlockValueDaily() {
   });
   const finalize = arr => arr.filter(r => r.day && isFinite(r.p50)).sort((a, b) => a.day < b.day ? -1 : 1);
   try {
-    const res = await fetch("/api/history");
+    const res = await fetch("/api/history" + netQ());
     if (res.ok) {
       const j = await res.json();
       if (j.days && j.days.length) {
         STATE.pooled = (j.pooled && isFinite(j.pooled.p90)) ? j.pooled : null;
         return finalize(j.days.map(shape));
       }
+      // API reachable but this network has no data yet — don't fall back to the
+      // mainnet CSV, which would mislabel mainnet numbers as this network's.
+      if (j.network && j.network !== "mainnet") { STATE.pooled = null; return []; }
     }
   } catch (e) { /* fall through to CSV */ }
-  const txt = await fetch("block_rewards_percentiles.csv").then(r => { if (!r.ok) throw new Error("percentiles.csv " + r.status); return r.text(); });
-  return finalize(parseCsv(txt).map(shape));
+  try {
+    const txt = await fetch(netCsv("block_rewards_percentiles.csv")).then(r => { if (!r.ok) throw new Error("percentiles.csv " + r.status); return r.text(); });
+    return finalize(parseCsv(txt).map(shape));
+  } catch (e) { STATE.pooled = null; return []; }
 }
 
 // Bid & win daily rows. Primary source is the server API backed by the cache DB
@@ -112,14 +125,17 @@ async function loadBidWinDaily() {
   const shape = r => ({ day: csvDay(r.day), my_bid: +r.my_bid, winnable_blocks: +r.winnable_blocks, max_wait_min: +r.max_wait_min, max_wait_hours: +r.max_wait_hours });
   const finalize = arr => arr.filter(r => r.day && isFinite(r.my_bid));
   try {
-    const res = await fetch("/api/bidwait");
+    const res = await fetch("/api/bidwait" + netQ());
     if (res.ok) {
       const j = await res.json();
       if (j.bids && j.bids.length) return finalize(j.bids.map(shape));
+      if (j.network && j.network !== "mainnet") return [];   // no data yet; see loadBlockValueDaily
     }
   } catch (e) { /* fall through to CSV */ }
-  const txt = await fetch("blockspace_max_wait.csv").then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); });
-  return finalize(parseCsv(txt).map(shape));
+  try {
+    const txt = await fetch(netCsv("blockspace_max_wait.csv")).then(r => { if (!r.ok) throw new Error("max_wait.csv " + r.status); return r.text(); });
+    return finalize(parseCsv(txt).map(shape));
+  } catch (e) { return []; }
 }
 
 async function loadAll() {
@@ -212,10 +228,39 @@ function bidAggregates() {
 //  RENDER — entry
 // ============================================================
 function renderAll() {
+  // A network with no built history yet (e.g. Sepolia before its census/build has
+  // run) has no daily rows. Show a notice and hide the dashboard rather than
+  // crashing the renderers, which assume at least one day.
+  const main = document.querySelector("main");
+  const hasData = STATE.blockValueDaily.length > 0;
+  setEmptyNotice(!hasData);
+  if (main) main.style.display = hasData ? "" : "none";
+  if (!hasData) return;
   renderOverview();
   renderBlockValue();
   renderBidWin();
   pulse();
+}
+
+// Inserts (or removes) a "no data yet" banner above <main> for the selected network.
+function setEmptyNotice(show) {
+  let el = document.getElementById("net-empty-notice");
+  if (!show) { if (el) el.remove(); return; }
+  const main = document.querySelector("main");
+  if (!el && main) {
+    el = document.createElement("div");
+    el.id = "net-empty-notice";
+    el.className = "container";
+    el.style.cssText = "margin:3rem auto;max-width:680px;padding:1.5rem 1.75rem;" +
+      "border:1px solid var(--border,#8884);border-radius:12px;text-align:center;line-height:1.5;";
+    main.parentNode.insertBefore(el, main);
+  }
+  if (el) {
+    const n = escapeHtml(NET());
+    el.innerHTML = `<strong>No ${n} data yet.</strong><br>` +
+      `Run the ${n} census, then <code>build_history.py --${n}</code> on the server, ` +
+      `to populate this view.`;
+  }
 }
 
 function pulse() {
@@ -1036,6 +1081,32 @@ function wireHistMetric() {
   }));
   sync();
 }
+// Network toggle (mainnet | sepolia) — drives the DB-backed views only. The Live
+// and Search tabs are live-RPC and mainnet-only, so they are hidden on other
+// networks. Unlike the other toggles this must RE-FETCH, not just re-render.
+function applyNetworkTabs() {
+  const liveOnly = ["live", "search"];
+  const hide = NET() !== "mainnet";
+  liveOnly.forEach(t => document.querySelectorAll(`[data-tab-link="${t}"]`).forEach(a => {
+    (a.closest("li") || a).style.display = hide ? "none" : "";
+  }));
+  if (hide && liveOnly.includes(STATE.tab)) location.hash = "#overview";
+}
+function wireNetwork() {
+  applyNetworkTabs();
+  document.querySelectorAll("button[data-network]").forEach(b => b.addEventListener("click", async () => {
+    if (NET() === b.dataset.network) return;
+    STATE.network = b.dataset.network;
+    document.querySelectorAll("button[data-network]").forEach(x => x.classList.toggle("active", x.dataset.network === STATE.network));
+    applyNetworkTabs();
+    await Promise.all([loadAll(), loadHealth()]);
+    const last = STATE.blockValueDaily[STATE.blockValueDaily.length - 1];
+    document.querySelectorAll(".pulled-stamp").forEach(el => el.textContent = last ? dateShort(last.day) : "—");
+    renderBidLadder();
+    renderAll();
+    renderBuildStamp();
+  }));
+}
 function wireLookup() {
   const input = document.getElementById("lookup-input");
   if (!input) return;
@@ -1081,7 +1152,7 @@ function wireTabs() {
 // time is shown in the Overview header (renderOverview); the footer keeps the
 // running code version + data-through.
 async function loadHealth() {
-  try { STATE.health = await fetch("/api/health").then(r => r.json()); }
+  try { STATE.health = await fetch("/api/health" + netQ()).then(r => r.json()); }
   catch (e) { STATE.health = null; }
 }
 
@@ -1120,6 +1191,7 @@ async function boot() {
   initTheme();
   wireTheme();
   wireWindow();
+  wireNetwork();
   wireTabs();
   wireMetric();
   wireHistMetric();

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Keep the Sepolia census cache current: catch blocks_cache_sepolia.sqlite up to
-# the chain tip. Unlike the mainnet refresh this does NOT run build_history.py —
-# the dashboard is mainnet-only and reads blocks_cache.sqlite, so there is nothing
-# to rebuild for Sepolia; this just extends the census cache.
+# the chain tip, then rebuild the Sepolia dashboard tables. The live server reads
+# the tables per request, so it does not need restarting; the next page load on
+# the Sepolia network toggle shows fresh data.
 #
 # Run it from the systemd timer in deploy/ (blockspace-refresh-sepolia.timer) or
 # from cron. Credentials come from the environment (systemd EnvironmentFile, or
@@ -21,4 +21,7 @@ PY=".venv/bin/python"
 # are fetched, the rest are cache hits. --reverse fills newest-first, so an
 # interrupted run still leaves a contiguous recent window.
 "$PY" executionRewards.py --sepolia --complete --hours 6 --reverse
+# Rebuild the Sepolia dashboard tables (daily_percentiles / summary / bid_winnable)
+# into blocks_cache_sepolia.sqlite so the site's Sepolia toggle stays current.
+"$PY" build_history.py --sepolia --report-gaps
 echo "sepolia refresh complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

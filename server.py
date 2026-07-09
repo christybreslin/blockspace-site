@@ -38,7 +38,27 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CACHE_DB = os.path.join(BASE, "blocks_cache.sqlite")   # built by executionRewards.py + build_history.py
+
+# DB-backed history is per-network: each network's cache holds its own
+# daily_percentiles / summary / bid_winnable tables (built by build_history.py).
+# The ?network= query param is validated against this map, so it can only ever
+# open one of these known files, never an arbitrary path.
+_NETWORK_DBS = {
+    "mainnet": "blocks_cache.sqlite",
+    "sepolia": "blocks_cache_sepolia.sqlite",
+}
+CACHE_DB = os.path.join(BASE, _NETWORK_DBS["mainnet"])   # default (mainnet)
+
+
+def _db_path(network):
+    """Resolve a network name to its cache DB path, defaulting to mainnet."""
+    return os.path.join(BASE, _NETWORK_DBS.get(network, _NETWORK_DBS["mainnet"]))
+
+
+def _net(q):
+    """Read + validate ?network= from a parsed query dict; default mainnet."""
+    n = (q.get("network", ["mainnet"])[0] or "mainnet")
+    return n if n in _NETWORK_DBS else "mainnet"
 
 
 def _git(*args):
@@ -53,23 +73,24 @@ VERSION = _git("rev-parse", "--short", "HEAD") or "unknown"
 COMMIT_DATE = _git("log", "-1", "--date=short", "--format=%cd")
 
 
-def _cache_conn():
-    if not os.path.exists(CACHE_DB):
+def _cache_conn(network="mainnet"):
+    path = _db_path(network)
+    if not os.path.exists(path):
         return None
     try:
-        conn = sqlite3.connect(f"file:{CACHE_DB}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.execute("PRAGMA busy_timeout=5000")   # wait, don't error, if a refresh is mid-write
         return conn
     except sqlite3.Error:
         return None
 
 
-def history_rows():
+def history_rows(network="mainnet"):
     """Daily reward percentiles from the cache DB's daily_percentiles table.
 
     Returns [] if the cache/table is absent, so the front end falls back to the CSV.
     """
-    conn = _cache_conn()
+    conn = _cache_conn(network)
     if conn is None:
         return []
     fees = ("day", "blocks", "p50", "p80", "p90", "p99")
@@ -93,9 +114,9 @@ def history_rows():
         conn.close()
 
 
-def summary_dict():
+def summary_dict(network="mainnet"):
     """Pooled full-period percentiles (90th pct of every block), or {} if absent."""
-    conn = _cache_conn()
+    conn = _cache_conn(network)
     if conn is None:
         return {}
     try:
@@ -106,9 +127,9 @@ def summary_dict():
         conn.close()
 
 
-def data_through():
+def data_through(network="mainnet"):
     """Most recent day present in daily_percentiles (the data freshness mark)."""
-    conn = _cache_conn()
+    conn = _cache_conn(network)
     if conn is None:
         return None
     try:
@@ -120,9 +141,9 @@ def data_through():
         conn.close()
 
 
-def bidwait_rows():
+def bidwait_rows(network="mainnet"):
     """Bid & win rows from the cache DB's bid_winnable table; [] if absent."""
-    conn = _cache_conn()
+    conn = _cache_conn(network)
     if conn is None:
         return []
     try:
@@ -485,17 +506,22 @@ class Handler(SimpleHTTPRequestHandler):
     def _api(self, path, q):
         try:
             if path == "/api/health":
+                network = _net(q)
                 return self._json({
                     "ok": True, "head": HEAD, "window": len(WINDOW),
-                    "version": VERSION, "commit_date": COMMIT_DATE,
-                    "data_through": data_through(), "refreshed_at": summary_dict().get("built_at"),
+                    "version": VERSION, "commit_date": COMMIT_DATE, "network": network,
+                    "data_through": data_through(network),
+                    "refreshed_at": summary_dict(network).get("built_at"),
                 })
             if path == "/api/head":
                 return self._json({"head": head_number()})
             if path == "/api/history":
-                return self._json({"days": history_rows(), "pooled": summary_dict()})
+                network = _net(q)
+                return self._json({"days": history_rows(network),
+                                   "pooled": summary_dict(network), "network": network})
             if path == "/api/bidwait":
-                return self._json({"bids": bidwait_rows()})
+                network = _net(q)
+                return self._json({"bids": bidwait_rows(network), "network": network})
             if path == "/api/live/recent":
                 n = min(int((q.get("n", ["120"])[0])), WINDOW_MAX)
                 with _win_lock:

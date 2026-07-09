@@ -31,8 +31,25 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CACHE_DB = os.path.join(BASE, "blocks_cache.sqlite")
-OUT_CSV = os.path.join(BASE, "block_rewards_percentiles.csv")
+
+# Per-network cache DB + CSV outputs. build_history reads the raw blocks from the
+# network's cache and writes its summary tables back into that same DB, so mainnet
+# and Sepolia stay fully separate. Mainnet keeps the original filenames for
+# backward compatibility; other networks get a suffix.
+_NETWORKS = {
+    "mainnet": {
+        "cache_db":    "blocks_cache.sqlite",
+        "percentiles": "block_rewards_percentiles.csv",
+        "max_wait":    "blockspace_max_wait.csv",
+    },
+    "sepolia": {
+        "cache_db":    "blocks_cache_sepolia.sqlite",
+        "percentiles": "block_rewards_percentiles_sepolia.csv",
+        "max_wait":    "blockspace_max_wait_sepolia.csv",
+    },
+}
+CACHE_DB = os.path.join(BASE, _NETWORKS["mainnet"]["cache_db"])       # default
+OUT_CSV = os.path.join(BASE, _NETWORKS["mainnet"]["percentiles"])     # default
 
 
 def block_take(block, fees):
@@ -66,18 +83,31 @@ def block_take(block, fees):
 
 def main():
     ap = argparse.ArgumentParser(description="Build history CSV from the block cache.")
+    ap.add_argument("--network", choices=sorted(_NETWORKS), default="mainnet",
+                    help="Which network's cache to build tables for (default: mainnet). "
+                         "Each network has its own cache DB and CSV outputs.")
+    ap.add_argument("--sepolia", action="store_true",
+                    help="Shorthand for --network sepolia.")
     ap.add_argument("--min-blocks", type=int, default=7000,
                     help="Minimum blocks for a day to be written (default 7000).")
     ap.add_argument("--report-gaps", action="store_true",
                     help="List interior days that are missing or short of --min-blocks "
                          "(these show as empty cells in the Overview calendar).")
-    ap.add_argument("--out", default=OUT_CSV, help="Output CSV path.")
+    ap.add_argument("--out", default=None,
+                    help="Output CSV path (default: the selected network's CSV).")
     args = ap.parse_args()
 
-    if not os.path.exists(CACHE_DB):
-        sys.exit(f"No cache at {CACHE_DB} — run executionRewards.py first.")
+    network = "sepolia" if args.sepolia else args.network
+    net = _NETWORKS[network]
+    cache_db = os.path.join(BASE, net["cache_db"])
+    out_csv = args.out or os.path.join(BASE, net["percentiles"])
+    max_wait_csv = os.path.join(BASE, net["max_wait"])
 
-    conn = sqlite3.connect(CACHE_DB)
+    if not os.path.exists(cache_db):
+        sys.exit(f"No cache at {cache_db} — run executionRewards.py "
+                 f"{'--sepolia ' if network == 'sepolia' else ''}first.")
+
+    conn = sqlite3.connect(cache_db)
     conn.execute("PRAGMA busy_timeout=60000")   # wait out the live server / catch-up locks
     days = {}      # 'YYYY-MM-DD' -> list of (unix ts, reward ETH)
     day_nums = {}  # 'YYYY-MM-DD' -> list of block numbers (for the contiguity gap check)
@@ -243,16 +273,16 @@ def main():
     conn.commit()
 
     # 2) Also write the CSVs (fallback if the API/DB is unavailable).
-    with open(args.out, "w") as f:
+    with open(out_csv, "w") as f:
         f.write("day,blocks,p50,p80,p90,p99,take_p50,take_p80,take_p90,take_p99\n")
         for r in rows:
             f.write(f"{r[0]} 00:00:00.000 UTC," + ",".join(str(x) for x in r[1:]) + "\n")
-    with open(os.path.join(BASE, "blockspace_max_wait.csv"), "w") as f:
+    with open(max_wait_csv, "w") as f:
         f.write("day,my_bid,winnable_blocks,max_wait_min,max_wait_hours\n")
         for day, bid, nwin, wmin, whr in bidrows:
             f.write(f"{day} 00:00:00.000 UTC,{bid},{nwin},{wmin:.6f},{whr:.6f}\n")
 
-    print(f"Scanned {n:,} cached blocks.")
+    print(f"[{network}] Scanned {n:,} cached blocks from {os.path.basename(cache_db)}.")
     if rows:
         print(f"Wrote {len(rows)} day rows + {len(bidrows)} bid rows "
               f"({rows[0][0]} → {rows[-1][0]}) to DB tables + CSVs")
