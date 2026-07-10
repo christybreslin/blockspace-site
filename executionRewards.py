@@ -173,6 +173,23 @@ def _configure_network(network: str):
 # Resolve mainnet settings at import so existing (mainnet) behaviour is unchanged.
 _configure_network("mainnet")
 
+
+def _redact_url(url):
+    """Hide any user:password embedded in a URL before printing it (some endpoints
+    carry HTTP basic-auth credentials inline; requests uses them but they must
+    never land in a log file)."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not (parts.username or parts.password):
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    return urlunsplit((parts.scheme, "***@" + host, parts.path, parts.query, parts.fragment))
+
 # Shared, connection-pooled HTTP session so concurrent workers reuse keep-alive
 # connections instead of opening a new socket per call.
 _session = requests.Session()
@@ -577,7 +594,7 @@ def main():
     print("Ethereum Execution Layer Reward Analyser")
     print("=" * 60)
     print(f"Network: {NETWORK}")
-    print(f"RPC:    {RPC_URL}")
+    print(f"RPC:    {_redact_url(RPC_URL)}")
     print(f"Period: {datetime.fromtimestamp(START_TS, tz=timezone.utc).date()} → "
           f"{datetime.fromtimestamp(END_TS, tz=timezone.utc).date()}")
     print(f"Target sample: {N_SAMPLES} blocks")
