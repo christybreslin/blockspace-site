@@ -209,8 +209,11 @@ COMPLETE    = False        # if True, fetch EVERY block in the range (no samplin
 SAMPLE_RANDOM = False      # if True, sample N blocks at random (else even grid)
 REVERSE     = False        # if True, fetch newest block first (backward fill)
 TIMEOUT     = 30           # seconds per RPC call
-MAX_RETRIES = 8            # retries on rate-limit / transient errors
+MAX_RETRIES = 12           # retries on rate-limit / transient errors (safety net so a
+                           # transient 429 burst can't kill a long census mid-run)
 BACKOFF_BASE = 1.0         # seconds; exponential backoff on HTTP 429
+BACKOFF_MAX = 30.0         # cap the exponential backoff so more retries don't mean
+                           # multi-minute waits per call
 # WORKERS, SLEEP_MS and CACHE_DB are resolved per-network by _configure_network()
 # (see CONFIG section): mainnet pushes hard, Sepolia runs gently, each with its
 # own cache file. Override workers/sleep with --workers / --sleep-ms.
@@ -357,7 +360,7 @@ def rpc(method: str, params: list):
             # Connection / DNS / timeout error — transient. Back off and retry
             # rather than letting the caller skip (and never cache) this block.
             if attempt < MAX_RETRIES:
-                wait = BACKOFF_BASE * (2 ** attempt)
+                wait = min(BACKOFF_MAX, BACKOFF_BASE * (2 ** attempt))
                 tqdm.write(f"  connection error ({type(e).__name__}); "
                            f"backing off {wait:.1f}s …")
                 time.sleep(wait)
@@ -369,7 +372,7 @@ def rpc(method: str, params: list):
             if attempt < MAX_RETRIES:
                 retry_after = resp.headers.get("Retry-After")
                 wait = float(retry_after) if retry_after and retry_after.isdigit() \
-                    else BACKOFF_BASE * (2 ** attempt)
+                    else min(BACKOFF_MAX, BACKOFF_BASE * (2 ** attempt))
                 tqdm.write(f"  rate-limited ({resp.status_code}); "
                            f"backing off {wait:.1f}s …")
                 time.sleep(wait)
