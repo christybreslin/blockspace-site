@@ -27,7 +27,8 @@ const STATE = {
   live: [],                 // newest first (from /api/live/recent)
   liveHead: 0,
   metric: "take",           // Live tab: "take" (proposer/Dune CASE) | "fees" (priority-fee sum)
-  hmetric: "fees",          // history tabs (Overview/Block value): "fees" | "take" (proposer take)
+  hmetric: "take",          // history tabs (Overview/Block value): "take" (validator reward /
+                            // relay winning bid — the bid we must beat) | "fees" (priority-fee sum)
   bvSortKey: "day",  bvSortDir: "desc", bvSearch: "",
   bwSortKey: "my_bid", bwSortDir: "asc",
   gas: null,                // latest /api/gas (Search tab)
