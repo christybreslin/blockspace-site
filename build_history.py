@@ -176,14 +176,16 @@ def main():
             float(np.percentile(tk, 90)), float(np.percentile(tk, 99)),
         ))
 
-        # Bid & win: you "win" a block if your bid >= its value (reward <= bid).
+        # Bid & win: you "win" a block when your bid clears the validator reward
+        # the proposer would otherwise receive — the relay winning bid you must
+        # beat — so this uses `takes` (validator reward), not the priority-fee sum.
         # max_wait = longest gap (minutes) between winnable blocks, including the
         # stretch from day start to the first win and the last win to day end.
         day_start = int(datetime.strptime(day, "%Y-%m-%d")
                         .replace(tzinfo=timezone.utc).timestamp())
         day_end = day_start + 86400
         for bid in BIDS:
-            wins = [ts[i] for i in range(len(ts)) if rewards[i] <= bid]
+            wins = [ts[i] for i in range(len(ts)) if takes[i] <= bid]
             n_win = len(wins)
             if n_win == 0:
                 max_wait_s = 86400
