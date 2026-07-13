@@ -366,7 +366,7 @@ function renderHotDays() {
   const avgTakeP90 = fin(P.take_p90_365d, avg(ry.map(d => fin(d.take_p90, d.p90))));
   const head = `<thead><tr>
     <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th>
-    <th>Avg fees · p90 (1yr)</th><th>Avg validator reward · p90 (1yr)</th><th>Blocks</th>
+    <th>Avg fees · p90 (1yr)</th><th>Avg validator reward · p90 (1yr)</th><th>× pooled</th>
   </tr></thead>`;
   const body = hot.map(d => `<tr>
     <td>${dateShort(d.day)}</td>
@@ -374,7 +374,7 @@ function renderHotDays() {
     <td class="accent">${ethF(fin(d.take_p90, d.p90))}</td>
     <td>${ethF(avgFeesP90)}</td>
     <td>${ethF(avgTakeP90)}</td>
-    <td>${numF(d.blocks)}</td>
+    <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
   </tr>`).join("");
   document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
     `<tr><td colspan="6">No hot days in range.</td></tr>`}</tbody>`;
