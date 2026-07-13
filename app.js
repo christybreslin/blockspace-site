@@ -1135,12 +1135,22 @@ function renderActiveTab() {
   else if (t === "live") renderLive();
   else if (t === "search") renderSearch();
 }
+// The evaluation-window switch (7d/30d/90d/1yr) only affects the windowed views.
+// Hot days (fixed rolling year), Live and Search ignore it, so hide it on those.
+// Target the evaluation-window switch specifically — the network switch reuses the
+// same .window-switch class, so key off its aria-label.
+const WINDOW_TABS = new Set(["overview", "block-value", "bid-win"]);
+function applyWindowSwitch() {
+  const el = document.querySelector('.window-switch[aria-label="Evaluation window"]');
+  if (el) el.style.display = WINDOW_TABS.has(STATE.tab) ? "" : "none";
+}
 function wireTabs() {
   const fromHash = () => { const h = (location.hash || "").replace(/^#/, ""); return TABS.includes(h) ? h : "overview"; };
   const apply = () => {
     const t = fromHash(); STATE.tab = t;
     document.querySelectorAll("[data-tab-content]").forEach(el => { el.hidden = el.dataset.tabContent !== t; });
     document.querySelectorAll("[data-tab-link]").forEach(a => a.classList.toggle("active", a.dataset.tabLink === t));
+    applyWindowSwitch();   // show the 7d/30d/… switch only on windowed tabs
     renderActiveTab();   // recompute charts at the now-visible width
     if (t === "search" && searchFeed) searchFeed.poll();   // snappy first load, then 5s polling
     window.scrollTo(0, 0);
