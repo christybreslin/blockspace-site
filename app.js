@@ -358,26 +358,19 @@ function renderHotDays() {
     `hot-day threshold <span class="mono">${ethF(thresh)}</span> ETH (1.5× rolling-year pooled p90 <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
   hotDeck.classList.toggle("stale", dataIsStale());
 
-  // Show both bases side by side so priority fees and validator reward can be
-  // compared per day, each against the rolling-year average (pooled) p90 — the
-  // same benchmark the Overview headline uses. The two "Avg" columns are constant
-  // across rows by design; all four p90 columns are fixed (not toggle-driven).
-  const avgFeesP90 = fin(P.p90_365d, avg(ry.map(d => d.p90)));
-  const avgTakeP90 = fin(P.take_p90_365d, avg(ry.map(d => fin(d.take_p90, d.p90))));
+  // Per-day p90 on both bases — the exact numbers the Overview daily p90 graph
+  // plots for each day — plus × pooled (day p90 vs the rolling-year pooled p90).
   const head = `<thead><tr>
-    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th>
-    <th>Avg fees · p90 (1yr)</th><th>Avg validator reward · p90 (1yr)</th><th>× pooled</th>
+    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th><th>× pooled</th>
   </tr></thead>`;
   const body = hot.map(d => `<tr>
     <td>${dateShort(d.day)}</td>
     <td>${ethF(d.p90)}</td>
     <td class="accent">${ethF(fin(d.take_p90, d.p90))}</td>
-    <td>${ethF(avgFeesP90)}</td>
-    <td>${ethF(avgTakeP90)}</td>
     <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
   </tr>`).join("");
   document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
-    `<tr><td colspan="6">No hot days in range.</td></tr>`}</tbody>`;
+    `<tr><td colspan="4">No hot days in range.</td></tr>`}</tbody>`;
 }
 
 // ----- Block value (Q1) -------------------------------------
