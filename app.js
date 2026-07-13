@@ -317,7 +317,7 @@ function renderOverview() {
     { label: "Tail · latest", value: ethF(lp99), foot: "p99 · latest day", cls: "neutral" },
     { label: "Tail · 1yr", value: ethF(p99_1yr), foot: "p99 · rolling 365 days", cls: "neutral" },
     { label: "Blocks / day", value: numF(latest.blocks), foot: "latest · ~12s cadence", cls: "neutral" },
-    { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `p90 ≥ ${ethF(hotThresh)} · list all →`, cls: hotDays > 0 ? "neg" : "neutral", href: "#hot-days" },
+    { label: "Hot days", value: `${numF(hotDays)} / ${numF(hotTotal)}`, foot: `threshold ${ethF(hotThresh)} ETH · list all →`, cls: hotDays > 0 ? "neg" : "neutral", href: "#hot-days" },
   ];
   document.getElementById("hero-kpis").innerHTML = tiles.map(t => {
     const inner = `
@@ -355,17 +355,20 @@ function renderHotDays() {
   const hotDeck = document.getElementById("hot-deck");
   hotDeck.innerHTML =
     `<span class="mono">${numF(hot.length)}</span> of <span class="mono">${numF(ry.length)}</span> days · rolling year · ${HMETRIC_LABEL()} · ` +
-    `p90 ≥ <span class="mono">${ethF(thresh)}</span> ETH (1.5× rolling-year pooled <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
+    `hot-day threshold <span class="mono">${ethF(thresh)}</span> ETH (1.5× rolling-year pooled p90 <span class="mono">${ethF(pooledP90)}</span>)${refreshStamp()}`;
   hotDeck.classList.toggle("stale", dataIsStale());
 
+  // Show both bases side by side so priority fees and validator reward can be
+  // compared directly per day. The p90 columns are fixed (not toggle-driven);
+  // × pooled and p99 follow the active metric (which also defines "hot").
   const head = `<thead><tr>
-    <th>Day</th><th>p90 · ETH</th><th>× pooled</th><th>p50 · ETH</th><th>p99 · ETH</th><th>Blocks</th>
+    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th><th>× pooled</th><th>p99 · ETH</th><th>Blocks</th>
   </tr></thead>`;
   const body = hot.map(d => `<tr>
     <td>${dateShort(d.day)}</td>
-    <td class="accent">${ethF(hmPick(d, "p90"))}</td>
+    <td>${ethF(d.p90)}</td>
+    <td class="accent">${ethF(fin(d.take_p90, d.p90))}</td>
     <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
-    <td>${ethF(hmPick(d, "p50"))}</td>
     <td>${ethF(hmPick(d, "p99"))}</td>
     <td>${numF(d.blocks)}</td>
   </tr>`).join("");
