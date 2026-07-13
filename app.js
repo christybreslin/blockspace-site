@@ -1104,7 +1104,8 @@ function wireNetwork() {
     const last = STATE.blockValueDaily[STATE.blockValueDaily.length - 1];
     document.querySelectorAll(".pulled-stamp").forEach(el => el.textContent = last ? dateShort(last.day) : "—");
     renderBidLadder();
-    renderAll();
+    renderAll();          // pre-render Overview / Block value / Bid & win panes
+    renderActiveTab();    // and refresh the visible tab too (Hot days isn't in renderAll)
     renderBuildStamp();
   }));
 }
