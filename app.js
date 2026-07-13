@@ -359,17 +359,21 @@ function renderHotDays() {
   hotDeck.classList.toggle("stale", dataIsStale());
 
   // Show both bases side by side so priority fees and validator reward can be
-  // compared directly per day. The p90 columns are fixed (not toggle-driven);
-  // × pooled and p99 follow the active metric (which also defines "hot").
+  // compared per day, each against the rolling-year average (pooled) p90 — the
+  // same benchmark the Overview headline uses. The two "Avg" columns are constant
+  // across rows by design; all four p90 columns are fixed (not toggle-driven).
+  const avgFeesP90 = fin(P.p90_365d, avg(ry.map(d => d.p90)));
+  const avgTakeP90 = fin(P.take_p90_365d, avg(ry.map(d => fin(d.take_p90, d.p90))));
   const head = `<thead><tr>
-    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th><th>× pooled</th><th>p99 · ETH</th><th>Blocks</th>
+    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th>
+    <th>Avg fees · p90 (1yr)</th><th>Avg validator reward · p90 (1yr)</th><th>Blocks</th>
   </tr></thead>`;
   const body = hot.map(d => `<tr>
     <td>${dateShort(d.day)}</td>
     <td>${ethF(d.p90)}</td>
     <td class="accent">${ethF(fin(d.take_p90, d.p90))}</td>
-    <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
-    <td>${ethF(hmPick(d, "p99"))}</td>
+    <td>${ethF(avgFeesP90)}</td>
+    <td>${ethF(avgTakeP90)}</td>
     <td>${numF(d.blocks)}</td>
   </tr>`).join("");
   document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
