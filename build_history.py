@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-Build the site's history CSV from the local block cache.
+Build the site's history tables + CSVs from the local block cache.
 
-Reads `blocks_cache.sqlite` (populated by executionRewards.py) and writes
-`block_rewards_percentiles.csv` in the exact format the dashboard loads:
-
-    day,blocks,p50,p80,p90,p99
-    2026-01-01 00:00:00.000 UTC,7178,0.0071,0.0118,0.0145,0.0363
-
-Each row is one UTC day's distribution of per-block execution-layer reward
-(priority-fee sum, Σ(effectiveGasPrice - baseFee)·gasUsed, in ETH). Unlike the
-old Dune export this is a complete census (every block) and has a real p80
-(the Dune query had a p80==p50 bug).
+Reads a network's `blocks_cache*.sqlite` (populated by executionRewards.py) and
+writes the tables the dashboard reads (daily_percentiles, summary, bid_winnable)
+back into that same DB, plus CSV fallbacks. Each daily row is one UTC day's
+distribution of per-block execution-layer reward, on two bases: priority-fee sum
+(fees) and validator reward / proposer take.
 
 Usage:
-    python3 build_history.py                 # writes block_rewards_percentiles.csv
+    python3 build_history.py                 # full rebuild (rescans the whole cache)
+    python3 build_history.py --incremental   # only parse blocks past the watermark
+    python3 build_history.py --sepolia       # the Sepolia cache/tables
     python3 build_history.py --min-blocks 0  # include partial (e.g. current) days
 
-Only days with at least --min-blocks blocks are written (default 7000), so a
-still-in-progress current day is omitted until complete.
+Incremental mode caches each day's parsed per-block values (day_cache table) and a
+block-number watermark (build_meta), so a routine catch-up parses only the handful
+of new tip blocks instead of the entire multi-million-block cache. It falls back to
+a full scan automatically when no cache exists. Because new blocks only ever append
+at the chain tip, incremental will NOT pick up a historical gap backfilled into an
+older day — run a plain (full) `build_history.py` once after such a backfill.
 """
 
 import os
@@ -51,6 +52,10 @@ _NETWORKS = {
 CACHE_DB = os.path.join(BASE, _NETWORKS["mainnet"]["cache_db"])       # default
 OUT_CSV = os.path.join(BASE, _NETWORKS["mainnet"]["percentiles"])     # default
 
+# Bid rungs for the "Bid & win" tab (match the retired Dune export so the app's
+# finer-rung interpolation still works).
+BIDS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00, 2.00, 5.00]
+
 
 def block_take(block, fees):
     """Proposer take = the builder→proposer payment for an MEV-Boost block, else
@@ -81,13 +86,125 @@ def block_take(block, fees):
     return fees if vanilla else mev_pay
 
 
+# ─── incremental day-value cache ────────────────────────────────────────────────
+# day_cache holds, per UTC day, the parsed per-block arrays the maths needs
+# (timestamp, fee, take) plus the day's block-number range/count for gap reporting.
+# build_meta.watermark is the highest block number already folded into the cache.
+
+def _load_day_cache(conn):
+    """Return {day: {ts, fee, take (np arrays), min, max, n}} from day_cache, or {}."""
+    days = {}
+    try:
+        cur = conn.execute(
+            "SELECT day,n_blocks,min_number,max_number,ts,fee,take FROM day_cache")
+    except sqlite3.OperationalError:
+        return days
+    for day, n, mn, mx, ts, fee, take in cur:
+        days[day] = {
+            "ts": np.frombuffer(ts, dtype=np.int64),
+            "fee": np.frombuffer(fee, dtype=np.float64),
+            "take": np.frombuffer(take, dtype=np.float64),
+            "min": mn, "max": mx, "n": n,
+        }
+    return days
+
+
+def _get_watermark(conn):
+    try:
+        r = conn.execute("SELECT value FROM build_meta WHERE key='watermark'").fetchone()
+        return int(r[0]) if r else -1
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        return -1
+
+
+def _scan(conn, since_number):
+    """Parse full blocks with number > since_number (all blocks if since_number < 0)
+    into {day: {ts, fee, take, nums (python lists)}}. Returns (new, n_scanned)."""
+    q = ("SELECT b.number, b.data, r.data FROM blocks b "
+         "LEFT JOIN receipts r ON b.number = r.number WHERE b.full = 1")
+    params = ()
+    if since_number >= 0:
+        q += " AND b.number > ?"
+        params = (since_number,)
+    new = {}
+    n = 0
+    for num, bd, rd in conn.execute(q, params):
+        if bd is None:
+            continue
+        block = json.loads(bd)
+        ts = block.get("timestamp")
+        if ts is None:
+            continue
+        tsi = int(ts, 16)
+        day = datetime.fromtimestamp(tsi, tz=timezone.utc).strftime("%Y-%m-%d")
+        base = int(block["baseFeePerGas"], 16)
+        if not block.get("transactions") or rd is None:
+            reward = 0.0
+        else:
+            reward = sum(
+                (int(x["effectiveGasPrice"], 16) - base) * int(x["gasUsed"], 16)
+                for x in json.loads(rd)
+                if int(x["effectiveGasPrice"], 16) > base
+            ) / 1e18
+        take = block_take(block, reward)
+        d = new.setdefault(day, {"ts": [], "fee": [], "take": [], "nums": []})
+        d["ts"].append(tsi); d["fee"].append(reward)
+        d["take"].append(take); d["nums"].append(num)
+        n += 1
+    return new, n
+
+
+def _merge(days, new):
+    """Fold freshly-scanned day lists into the cached day arrays (append + resort by
+    timestamp). Returns the set of days that changed."""
+    changed = set()
+    for day, d in new.items():
+        ts = np.asarray(d["ts"], dtype=np.int64)
+        fee = np.asarray(d["fee"], dtype=np.float64)
+        take = np.asarray(d["take"], dtype=np.float64)
+        nums = np.asarray(d["nums"], dtype=np.int64)
+        mn, mx = int(nums.min()), int(nums.max())
+        if day in days:
+            prev = days[day]
+            ts = np.concatenate([prev["ts"], ts])
+            fee = np.concatenate([prev["fee"], fee])
+            take = np.concatenate([prev["take"], take])
+            mn, mx = min(prev["min"], mn), max(prev["max"], mx)
+        order = np.argsort(ts, kind="stable")        # bid_winnable needs ts order;
+        days[day] = {                                # percentiles are order-independent
+            "ts": ts[order], "fee": fee[order], "take": take[order],
+            "min": mn, "max": mx, "n": int(ts.size),
+        }
+        changed.add(day)
+    return changed
+
+
+def _persist_day_cache(conn, days, changed, watermark):
+    conn.execute("""CREATE TABLE IF NOT EXISTS day_cache (
+        day TEXT PRIMARY KEY, n_blocks INTEGER, min_number INTEGER, max_number INTEGER,
+        ts BLOB, fee BLOB, take BLOB)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS build_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany(
+        "INSERT OR REPLACE INTO day_cache "
+        "(day,n_blocks,min_number,max_number,ts,fee,take) VALUES (?,?,?,?,?,?,?)",
+        [(day, days[day]["n"], days[day]["min"], days[day]["max"],
+          days[day]["ts"].tobytes(), days[day]["fee"].tobytes(), days[day]["take"].tobytes())
+         for day in changed])
+    conn.execute("INSERT OR REPLACE INTO build_meta (key,value) VALUES ('watermark',?)",
+                 (str(watermark),))
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Build history CSV from the block cache.")
+    ap = argparse.ArgumentParser(description="Build history tables/CSVs from the block cache.")
     ap.add_argument("--network", choices=sorted(_NETWORKS), default="mainnet",
                     help="Which network's cache to build tables for (default: mainnet). "
                          "Each network has its own cache DB and CSV outputs.")
     ap.add_argument("--sepolia", action="store_true",
                     help="Shorthand for --network sepolia.")
+    ap.add_argument("--incremental", action="store_true",
+                    help="Only parse blocks past the stored watermark (fast). Falls back "
+                         "to a full scan if no day cache exists. Use a plain (full) run "
+                         "after backfilling a historical gap.")
     ap.add_argument("--min-blocks", type=int, default=7000,
                     help="Minimum blocks for a day to be written (default 7000).")
     ap.add_argument("--report-gaps", action="store_true",
@@ -109,97 +226,70 @@ def main():
 
     conn = sqlite3.connect(cache_db)
     conn.execute("PRAGMA busy_timeout=60000")   # wait out the live server / catch-up locks
-    days = {}      # 'YYYY-MM-DD' -> list of (unix ts, reward ETH)
-    day_nums = {}  # 'YYYY-MM-DD' -> list of block numbers (for the contiguity gap check)
-    n = 0
-    for num, bd, rd in conn.execute(
-        "SELECT b.number, b.data, r.data FROM blocks b "
-        "LEFT JOIN receipts r ON b.number = r.number WHERE b.full = 1"
-    ):
-        if bd is None:
-            continue
-        block = json.loads(bd)
-        ts = block.get("timestamp")
-        if ts is None:
-            continue
-        tsi = int(ts, 16)
-        day = datetime.fromtimestamp(tsi, tz=timezone.utc).strftime("%Y-%m-%d")
-        base = int(block["baseFeePerGas"], 16)
-        if not block.get("transactions") or rd is None:
-            reward = 0.0
-        else:
-            reward = sum(
-                (int(x["effectiveGasPrice"], 16) - base) * int(x["gasUsed"], 16)
-                for x in json.loads(rd)
-                if int(x["effectiveGasPrice"], 16) > base
-            ) / 1e18
-        take = block_take(block, reward)
-        days.setdefault(day, []).append((tsi, reward, take))
-        day_nums.setdefault(day, []).append(num)
-        n += 1
 
-    # Bid rungs for the "Bid & win" tab (match the retired Dune export so the
-    # app's finer-rung interpolation still works).
-    BIDS = [0.02, 0.05, 0.10, 0.25, 0.50, 1.00, 2.00, 5.00]
+    # Load the incremental baseline, or fall back to a full scan.
+    days, watermark, incremental = {}, -1, False
+    if args.incremental:
+        days = _load_day_cache(conn)
+        watermark = _get_watermark(conn)
+        incremental = bool(days) and watermark >= 0
+        if not incremental:
+            days, watermark = {}, -1        # nothing cached → full scan this run
+
+    new, n_scanned = _scan(conn, watermark if incremental else -1)
+    changed = _merge(days, new)
+    new_watermark = max((days[d]["max"] for d in days), default=-1)
+    # On a full run every day is (re)written; on incremental only the touched ones.
+    _persist_day_cache(conn, days, changed if incremental else set(days), new_watermark)
 
     # The only day that can be incomplete is the most recent one (the catch-up
-    # appends the chain tip), so that's the single day we hold back until it has
-    # a full day's blocks. Every earlier day is written regardless of count — a
-    # genuinely light day (e.g. a high-missed-slot day with ~6,800 blocks) is real
-    # data, not a partial; --min-blocks only gates the in-progress tail.
+    # appends the chain tip), so that's the single day we hold back until it has a
+    # full day's blocks. Every earlier day is written regardless of count — a
+    # genuinely light day is real data, not a partial; --min-blocks only gates the tail.
     latest_day = max(days) if days else None
 
     rows = []          # daily_percentiles (fees + take percentiles per day)
-    pooled = []        # every block's fee value, for the pooled full-period percentiles
-    pooled_take = []   # every block's proposer take, same purpose
-    day_rewards = {}   # written day -> np.array of per-block fees (for windowed pooled pctiles)
+    pooled_fee = []    # per-day fee arrays, concatenated for the pooled percentiles
+    pooled_take = []   # per-day take arrays, same purpose
+    day_rewards = {}   # written day -> np.array of per-block fees (windowed pooled pctiles)
     day_takes = {}     # written day -> np.array of per-block take
     bidrows = []       # bid_winnable: (day, my_bid, winnable_blocks, max_wait_min, max_wait_hours)
     for day in sorted(days):
-        vals = days[day]
-        if day == latest_day and len(vals) < args.min_blocks:
+        d = days[day]
+        if day == latest_day and d["n"] < args.min_blocks:
             continue                      # current day still filling — hold back
-        vals.sort()                       # by timestamp
-        ts = [t for t, _, _ in vals]
-        rewards = [r for _, r, _ in vals]
-        takes = [k for _, _, k in vals]
-        pooled.extend(rewards)
-        pooled_take.extend(takes)
-        day_rewards[day] = np.asarray(rewards)
-        day_takes[day] = np.asarray(takes)
-        a, tk = np.array(rewards), np.array(takes)
+        fee, take, ts = d["fee"], d["take"], d["ts"]
+        pooled_fee.append(fee)
+        pooled_take.append(take)
+        day_rewards[day] = fee
+        day_takes[day] = take
         rows.append((
-            day, len(a),
-            float(np.percentile(a, 50)), float(np.percentile(a, 80)),
-            float(np.percentile(a, 90)), float(np.percentile(a, 99)),
-            float(np.percentile(tk, 50)), float(np.percentile(tk, 80)),
-            float(np.percentile(tk, 90)), float(np.percentile(tk, 99)),
+            day, int(d["n"]),
+            float(np.percentile(fee, 50)), float(np.percentile(fee, 80)),
+            float(np.percentile(fee, 90)), float(np.percentile(fee, 99)),
+            float(np.percentile(take, 50)), float(np.percentile(take, 80)),
+            float(np.percentile(take, 90)), float(np.percentile(take, 99)),
         ))
 
-        # Bid & win: you "win" a block when your bid clears the validator reward
-        # the proposer would otherwise receive — the relay winning bid you must
-        # beat — so this uses `takes` (validator reward), not the priority-fee sum.
-        # max_wait = longest gap (minutes) between winnable blocks, including the
-        # stretch from day start to the first win and the last win to day end.
+        # Bid & win: you "win" a block when your bid clears the validator reward the
+        # proposer would otherwise receive — the relay winning bid you must beat — so
+        # this uses `take`, not the priority-fee sum. max_wait = longest gap (minutes)
+        # between winnable blocks, incl. day start → first win and last win → day end.
         day_start = int(datetime.strptime(day, "%Y-%m-%d")
                         .replace(tzinfo=timezone.utc).timestamp())
         day_end = day_start + 86400
         for bid in BIDS:
-            wins = [ts[i] for i in range(len(ts)) if takes[i] <= bid]
-            n_win = len(wins)
+            wins = ts[take <= bid]        # ts is ascending, so wins is too
+            n_win = int(wins.size)
             if n_win == 0:
                 max_wait_s = 86400
             else:
-                gaps = [wins[0] - day_start] + \
-                       [wins[i + 1] - wins[i] for i in range(n_win - 1)] + \
-                       [day_end - wins[-1]]
-                max_wait_s = max(gaps)
+                gaps = np.concatenate(([wins[0] - day_start], np.diff(wins), [day_end - wins[-1]]))
+                max_wait_s = int(gaps.max())
             bidrows.append((day, bid, n_win, max_wait_s / 60.0, max_wait_s / 3600.0))
 
-    # 1) Write the daily_percentiles table into the cache DB (the site reads this
-    #    via the server's /api/history endpoint — the primary path for option B).
-    #    Both bases per day: fees (priority-fee sum) and take (proposer take).
-    conn.execute("DROP TABLE IF EXISTS daily_percentiles")    # schema gained take_* columns
+    # 1) daily_percentiles table (the site reads this via /api/history).
+    conn.execute("DROP TABLE IF EXISTS daily_percentiles")
     conn.execute("""CREATE TABLE daily_percentiles (
         day TEXT PRIMARY KEY, blocks INTEGER,
         p50 REAL, p80 REAL, p90 REAL, p99 REAL,
@@ -209,15 +299,14 @@ def main():
         "(day,blocks,p50,p80,p90,p99,take_p50,take_p80,take_p90,take_p99) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
 
-    # 1b) Pooled / windowed percentiles over every block (a different statistic from
-    #     the daily values). Computed symmetrically for both bases: the fee keys are
-    #     unprefixed (p90, p90_365d, hot_days, …) and the proposer-take keys carry a
-    #     "take_" prefix, so the front end can flip the whole dashboard between them.
+    # 1b) Pooled / windowed percentiles over every block, for both bases.
     conn.execute("CREATE TABLE IF NOT EXISTS summary (key TEXT PRIMARY KEY, value REAL)")
     conn.execute("DELETE FROM summary")
-    if pooled:
+    pooled = np.concatenate(pooled_fee) if pooled_fee else np.array([])
+    pooled_tk = np.concatenate(pooled_take) if pooled_take else np.array([])
+    if pooled.size:
         summary = {
-            "blocks": float(len(pooled)),
+            "blocks": float(pooled.size),
             "built_at": datetime.now(timezone.utc).timestamp(),   # last refresh time
         }
         qual_days = sorted(day_rewards)            # ascending; same set as `rows`
@@ -225,11 +314,8 @@ def main():
         ry_days = qual_days[-365:]
         daily = {r[0]: r for r in rows}            # day -> row tuple (for the hot-day count)
 
-        # Build the full stat-set for one metric. `pooled_arr` is every block's value;
-        # `day_map` gives per-day arrays for the windowed pooled percentiles; `p90_col`
-        # is the index of that metric's daily p90 in the `rows` tuple (4 fees / 8 take).
         def add_metric(prefix, pooled_arr, day_map, p90_col):
-            pa = np.array(pooled_arr)
+            pa = np.asarray(pooled_arr)
             summary[prefix + "p50"] = float(np.percentile(pa, 50))
             summary[prefix + "p80"] = float(np.percentile(pa, 80))
             summary[prefix + "p90"] = float(np.percentile(pa, 90))
@@ -259,8 +345,8 @@ def main():
             summary[prefix + "hot_total_days"] = float(len(ry_days))
             summary[prefix + "hot_peak"] = float(max((daily[d][p90_col] for d in ry_days), default=0.0))
 
-        add_metric("", pooled, day_rewards, 4)          # fees: daily p90 is rows[4]
-        add_metric("take_", pooled_take, day_takes, 8)  # take: daily take_p90 is rows[8]
+        add_metric("", pooled, day_rewards, 4)             # fees: daily p90 is rows[4]
+        add_metric("take_", pooled_tk, day_takes, 8)       # take: daily take_p90 is rows[8]
 
         conn.executemany("INSERT INTO summary (key,value) VALUES (?,?)", list(summary.items()))
 
@@ -284,18 +370,19 @@ def main():
         for day, bid, nwin, wmin, whr in bidrows:
             f.write(f"{day} 00:00:00.000 UTC,{bid},{nwin},{wmin:.6f},{whr:.6f}\n")
 
-    print(f"[{network}] Scanned {n:,} cached blocks from {os.path.basename(cache_db)}.")
+    mode = "incremental" if incremental else "full"
+    total = sum(days[d]["n"] for d in days)
+    print(f"[{network}] {mode} build: parsed {n_scanned:,} block(s) this run; "
+          f"{total:,} total across {len(days)} day(s).")
     if rows:
         print(f"Wrote {len(rows)} day rows + {len(bidrows)} bid rows "
               f"({rows[0][0]} → {rows[-1][0]}) to DB tables + CSVs")
     else:
         print("No complete days found — cache may be empty or below --min-blocks.")
 
-    # Interior coverage report. Block numbers are globally contiguous (a missed
-    # slot produces no block and consumes no number), so a real census gap shows
-    # up as a hole in the number sequence — that's the authoritative test, not a
-    # raw block count (a genuinely light day has a full, hole-free number run).
-    # Reports two kinds of gap, both of which leave empty Overview-calendar cells:
+    # Interior coverage report, from each day's cached block-number range. Block
+    # numbers are globally contiguous (a missed slot produces no block and consumes
+    # no number), so a real census gap shows up as a hole in the number sequence.
     #   • missing day  — a calendar day inside the span with no blocks at all
     #   • partial day  — a day whose block numbers have a hole (some not censused)
     if args.report_gaps and rows:
@@ -305,15 +392,14 @@ def main():
         d = first
         while d <= last:
             key = d.strftime("%Y-%m-%d")
-            nums = day_nums.get(key)
-            if not nums:
+            info = days.get(key)
+            if not info:
                 gaps.append((key, "missing — no blocks censused"))
             else:
-                lo, hi = min(nums), max(nums)
-                holes = (hi - lo + 1) - len(nums)
+                holes = (info["max"] - info["min"] + 1) - info["n"]
                 if holes:
                     gaps.append((key, f"partial — {holes:,} block number(s) "
-                                      f"missing in {lo:,}…{hi:,}"))
+                                      f"missing in {info['min']:,}…{info['max']:,}"))
             d += timedelta(days=1)
         if gaps:
             print(f"\n⚠ {len(gaps)} interior day(s) with gaps ({first} → {last}) "
@@ -321,7 +407,7 @@ def main():
             for day, why in gaps:
                 print(f"    {day}  {why}")
             print("  Backfill with: executionRewards.py --start <day> --end <next-day> "
-                  "--complete  (then re-run build_history.py)")
+                  "--complete  (then re-run a full build_history.py)")
         else:
             print(f"\n✓ No interior gaps: block numbers are contiguous across "
                   f"{first} → {last} (every day fully censused).")

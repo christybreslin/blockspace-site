@@ -23,5 +23,7 @@ PY=".venv/bin/python"
 "$PY" executionRewards.py --sepolia --complete --hours 6 --reverse
 # Rebuild the Sepolia dashboard tables (daily_percentiles / summary / bid_winnable)
 # into blocks_cache_sepolia.sqlite so the site's Sepolia toggle stays current.
-"$PY" build_history.py --sepolia --report-gaps
+# --incremental parses only blocks past the watermark (falls back to a full scan
+# the first time). Run a plain `build_history.py --sepolia` once after a gap backfill.
+"$PY" build_history.py --sepolia --incremental --report-gaps
 echo "sepolia refresh complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
