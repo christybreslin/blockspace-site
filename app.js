@@ -31,6 +31,7 @@ const STATE = {
                             // relay winning bid — the bid we must beat) | "fees" (priority-fee sum)
   bvSortKey: "day",  bvSortDir: "desc", bvSearch: "",
   bwSortKey: "my_bid", bwSortDir: "asc",
+  hotSortKey: "day", hotSortDir: "desc",
   gas: null,                // latest /api/gas (Search tab)
   mempool: null,            // latest /api/mempool (Search tab)
   health: null,             // /api/health (version, data_through, refreshed_at)
@@ -350,7 +351,7 @@ function renderHotDays() {
   const ry = bv.slice(-365);                                   // rolling year
   const pooledP90 = fin(hmP(P, "p90_365d"), avg(ry.map(d => hmPick(d, "p90"))));
   const thresh = fin(hmP(P, "hot_threshold"), 1.5 * pooledP90);
-  const hot = ry.filter(d => hmPick(d, "p90") >= thresh).sort((a, b) => a.day < b.day ? 1 : -1);  // most recent first
+  const hot = ry.filter(d => hmPick(d, "p90") >= thresh);   // sorted below per STATE.hotSort*
 
   const hotDeck = document.getElementById("hot-deck");
   hotDeck.innerHTML =
@@ -360,17 +361,36 @@ function renderHotDays() {
 
   // Per-day p90 on both bases — the exact numbers the Overview daily p90 graph
   // plots for each day — plus × pooled (day p90 vs the rolling-year pooled p90).
-  const head = `<thead><tr>
-    <th>Day</th><th>Priority fees · p90</th><th>Validator reward · p90</th><th>× pooled</th>
-  </tr></thead>`;
-  const body = hot.map(d => `<tr>
-    <td>${dateShort(d.day)}</td>
-    <td>${ethF(d.p90)}</td>
-    <td class="accent">${ethF(fin(d.take_p90, d.p90))}</td>
-    <td>${(hmPick(d, "p90") / pooledP90).toFixed(1)}×</td>
-  </tr>`).join("");
-  document.getElementById("hot-table").innerHTML = head + `<tbody>${body ||
-    `<tr><td colspan="4">No hot days in range.</td></tr>`}</tbody>`;
+  // Sortable: click any header to reorder (e.g. by validator reward).
+  const cols = [
+    { key: "day", label: "Day", text: true, val: d => d.day, fmt: d => dateShort(d.day) },
+    { key: "p90", label: "Priority fees · p90", val: d => d.p90, fmt: d => ethF(d.p90) },
+    { key: "take_p90", label: "Validator reward · p90", accent: true,
+      val: d => fin(d.take_p90, d.p90), fmt: d => ethF(fin(d.take_p90, d.p90)) },
+    { key: "xpooled", label: "× pooled", val: d => hmPick(d, "p90"),
+      fmt: d => (hmPick(d, "p90") / pooledP90).toFixed(1) + "×" },
+  ];
+  const scol = cols.find(c => c.key === STATE.hotSortKey) || cols[0];
+  const sdir = STATE.hotSortDir === "asc" ? 1 : -1;
+  hot.sort((a, b) => {
+    const av = scol.val(a), bv = scol.val(b);
+    return typeof av === "string" ? sdir * av.localeCompare(bv) : sdir * (av - bv);
+  });
+  const head = `<thead><tr>${cols.map(c =>
+    `<th class="${c.text ? "text" : ""}" data-key="${c.key}">${c.label}` +
+    (STATE.hotSortKey === c.key ? ` <span class="arrow">${STATE.hotSortDir === "desc" ? "▼" : "▲"}</span>` : "") +
+    `</th>`).join("")}</tr></thead>`;
+  const body = hot.map(d => `<tr>${cols.map(c =>
+    `<td class="${c.text ? "text" : ""}${c.accent ? " accent" : ""}">${c.fmt(d)}</td>`).join("")}</tr>`).join("");
+  const t = document.getElementById("hot-table");
+  t.innerHTML = head + `<tbody>${body ||
+    `<tr><td colspan="${cols.length}">No hot days in range.</td></tr>`}</tbody>`;
+  t.querySelectorAll("thead th").forEach(th => th.addEventListener("click", () => {
+    const k = th.dataset.key;
+    if (STATE.hotSortKey === k) STATE.hotSortDir = STATE.hotSortDir === "desc" ? "asc" : "desc";
+    else { STATE.hotSortKey = k; STATE.hotSortDir = "desc"; }
+    renderHotDays();
+  }));
 }
 
 // ----- Block value (Q1) -------------------------------------
