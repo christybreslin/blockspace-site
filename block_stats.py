@@ -35,6 +35,12 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 NETS = {"mainnet": "blocks_cache.sqlite", "sepolia": "blocks_cache_sepolia.sqlite"}
 
 
+def efmt(v):
+    """Readable ETH: fixed decimals for normal values, scientific for tiny ones so
+    sub-micro-ETH rewards don't just render as 0.000000."""
+    return f"{v:.6f}" if abs(v) >= 1e-4 else f"{v:.3e}"
+
+
 def block_take(block, fees):
     """Validator reward: the builder→proposer payment for an MEV-Boost block, else
     the priority-fee sum (same logic as build_history.py / server.py)."""
@@ -117,6 +123,9 @@ def main():
     ap.add_argument("--low", type=int, default=0, metavar="N",
                     help="Also list the N lowest non-zero blocks (validator reward), "
                          "ascending with the ratio to the previous value, to reveal any gap.")
+    ap.add_argument("--min-reward", type=float, default=0.0, metavar="ETH",
+                    help="Drop blocks whose validator reward is below this (ETH) before any "
+                         "stats — use it to eliminate zero/dust blocks once you've found the floor.")
     args = ap.parse_args()
 
     net = "sepolia" if args.sepolia else args.network
@@ -138,6 +147,10 @@ def main():
         sys.exit(f"No blocks found on/after {args.since} in {os.path.basename(db)}")
 
     fee, take, (d0, d1) = res
+    n0 = fee.size
+    if args.min_reward > 0:
+        keep = take >= args.min_reward
+        fee, take = fee[keep], take[keep]
     n = fee.size
     local = take == fee                # non-MEV-Boost (proposer-built) blocks
     nz = fee > 0
@@ -147,16 +160,19 @@ def main():
 
     print(f"[{net}] source: {src}")
     print(f"Period: {d0} → {d1}   ({n:,} blocks)")
+    if args.min_reward > 0:
+        print(f"Filter: validator reward >= {args.min_reward} ETH   "
+              f"(dropped {n0 - n:,} of {n0:,} zero/dust blocks)")
     print(f"Local / mempool (non-MEV-Boost) blocks: {int(local.sum()):,} "
           f"({100 * local.mean():.1f}% of blocks)   |   zero-reward blocks: {int((~nz).sum()):,}")
     print("=" * 64)
 
     print("1) Lowest block reward in the period")
-    print(f"     priority fees  : {fee.min():.6f} ETH")
-    print(f"     validator rwd  : {take.min():.6f} ETH")
+    print(f"     priority fees  : {efmt(fee.min())} ETH")
+    print(f"     validator rwd  : {efmt(take.min())} ETH")
     if nz.any():
-        print(f"     (lowest non-zero — fees {fee[nz].min():.6f}, "
-              f"validator {take[take > 0].min():.6f} ETH)")
+        print(f"     (lowest non-zero — fees {efmt(fee[nz].min())}, "
+              f"validator {efmt(take[take > 0].min())} ETH)")
     print()
 
     mf, medf = mm(fee)
@@ -193,7 +209,7 @@ def main():
         prev = None
         for v in nzv[:k]:
             ratio = f"   ({v / prev:.1f}× prev)" if prev else ""
-            print(f"     {v:.8f} ETH{ratio}")
+            print(f"     {efmt(v)} ETH{ratio}")
             prev = v
 
 
