@@ -126,6 +126,10 @@ def main():
     ap.add_argument("--min-reward", type=float, default=0.0, metavar="ETH",
                     help="Drop blocks whose validator reward is below this (ETH) before any "
                          "stats — use it to eliminate zero/dust blocks once you've found the floor.")
+    ap.add_argument("--bid", type=float, default=0.0, metavar="ETH",
+                    help="Min-bid analysis: assuming we get every block, how much value sits "
+                         "above this bid (left on the table if we cap each block at it), and "
+                         "the total if every block realised a flat bid.")
     args = ap.parse_args()
 
     net = "sepolia" if args.sepolia else args.network
@@ -199,6 +203,27 @@ def main():
               f"({mev_mean / loc_mean:.2f}× as much); median difference {mev_med - loc_med:+.6f} ETH")
     print(f"     (local group includes {int((take == fee)[~nz].sum()):,} zero-reward blocks — "
           f"negligible effect on the averages)")
+
+    # 5) Min-bid analysis: get every block, but cap what we realise at the bid.
+    if args.bid > 0:
+        B = args.bid
+        total = float(take.sum())
+        n_above = int((take > B).sum())
+        realized = float(np.minimum(take, B).sum())   # get every block, capped at B
+        left = total - realized                       # = Σ max(take - B, 0)
+        flat = B * n                                   # flat B on every block instead
+        print()
+        print(f"5) Min-bid analysis at B = {B} ETH (validator reward, {n:,} blocks)")
+        print(f"     total value of all blocks : {total:,.2f} ETH   (mean {total / n:.6f})")
+        print(f"     blocks above B            : {n_above:,} ({100 * n_above / n:.1f}%)   "
+              f"at/below B: {n - n_above:,} ({100 * (n - n_above) / n:.1f}%)")
+        print(f"     capped at B (realise min(value,B) on every block):")
+        print(f"        realised               : {realized:,.2f} ETH ({100 * realized / total:.1f}% of value)")
+        print(f"        LEFT ON THE TABLE      : {left:,.2f} ETH ({100 * left / total:.1f}% of total value)")
+        print(f"     flat B on every block:")
+        print(f"        total                  : {flat:,.2f} ETH   "
+              f"({flat - total:+,.2f} ETH vs the blocks' actual value — "
+              f"{'more' if flat >= total else 'less'} than they are worth)")
 
     if args.low:
         nzv = np.sort(take[take > 0])
