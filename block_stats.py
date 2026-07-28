@@ -133,7 +133,11 @@ def main():
     ap.add_argument("--min-bid", type=float, default=0.0, metavar="ETH",
                     help="MEV-Boost min-bid model: relay blocks whose bid is below this switch "
                          "to local building (earn priority fees instead of the relay bid). "
-                         "Reports the earnings lost, in ETH and basis points of total.")
+                         "Reports the change in execution-layer rewards, in ETH and basis points.")
+    ap.add_argument("--el-apr", type=float, default=0.0, metavar="PCT",
+                    help="Execution-layer APR in %% (e.g. 0.5). If given, the --min-bid impact is "
+                         "also shown as basis points of total staking yield, not just of the "
+                         "tips+MEV pool.")
     args = ap.parse_args()
 
     net = "sepolia" if args.sepolia else args.network
@@ -247,25 +251,34 @@ def main():
         avg_local = float(loc.mean()) if loc.size else 0.0
         own_fees = float(fee[switch].sum())          # each switched slot's own priority fees
 
-        def _bps(x):
+        # bps here is a share of the EXECUTION-LAYER reward pool (tips + MEV), NOT of
+        # total staking yield. Pass --el-apr to also express it as bps of yield.
+        def _elbps(x):
             return 10000 * x / baseline if baseline else 0.0
 
-        # Net change in total earnings (positive = gain, negative = loss).
+        def _yield(elbps):
+            # yield bps = EL APR (pct pts) × (fractional change of the EL pool) × 100
+            return (f"   ->  {args.el_apr * elbps / 100:+.1f} bps of yield"
+                    if args.el_apr > 0 else "")
+
         change_own = own_fees - lost_relay               # earn each slot's own local fees
-        change_avg = n_sw * avg_local - lost_relay       # earn the fleet-average local block
+        change_avg = n_sw * avg_local - lost_relay       # earn the average local block
         print()
         print(f"{sec}) MEV-Boost min-bid {B} ETH — relay blocks below the bid build locally instead")
         print(f"     affected relay blocks : {n_sw:,} ({100 * n_sw / n:.1f}% of all blocks)")
-        print(f"     baseline earnings (take every relay bid) : {baseline:,.2f} ETH")
-        print(f"     relay value given up on those blocks     : {lost_relay:,.2f} ETH "
+        print(f"     execution-layer rewards in period (baseline) : {baseline:,.2f} ETH")
+        print(f"     relay value given up on those blocks         : {lost_relay:,.2f} ETH "
               f"(avg bid {lost_relay / n_sw if n_sw else 0:.4f})")
-        print(f"     net change in total earnings after building locally (+ gain / - loss):")
+        print(f"     net change in execution-layer rewards (+ gain / - loss):")
         print(f"        each slot's own priority fees (avg {own_fees / n_sw if n_sw else 0:.4f}) : "
-              f"{change_own:+,.2f} ETH  =  {_bps(change_own):+.1f} bps")
-        print(f"        fleet-average local block ({avg_local:.4f})        : "
-              f"{change_avg:+,.2f} ETH  =  {_bps(change_avg):+.1f} bps")
-        print(f"     NOTE: both proxies likely OVERstate local yield on these low-bid slots "
-              f"(private orderflow / selection bias), so treat a 'gain' as, at best, break-even.")
+              f"{change_own:+,.2f} ETH  =  {_elbps(change_own):+.1f} bps of EL rewards{_yield(_elbps(change_own))}")
+        print(f"        average local block ({avg_local:.4f})               : "
+              f"{change_avg:+,.2f} ETH  =  {_elbps(change_avg):+.1f} bps of EL rewards{_yield(_elbps(change_avg))}")
+        if args.el_apr <= 0:
+            print(f"     NOTE: 'bps of EL rewards' is a % of the tips+MEV pool, NOT of staking yield "
+                  f"(pass --el-apr X to convert).")
+        print(f"     NOTE: both local-yield proxies likely OVERstate local yield on these low-bid "
+              f"slots (private orderflow / selection bias), so treat a 'gain' as, at best, break-even.")
 
     if args.low:
         nzv = np.sort(take[take > 0])
