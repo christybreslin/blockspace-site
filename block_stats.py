@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+Ad-hoc per-block reward stats from the block cache, over a date range.
+
+Reports, for blocks on/after --since (UTC day, inclusive) up to the latest cached:
+  1) the lowest block reward in the period
+  2) mean & median across ALL blocks
+  3) mean & median across only LOCAL / mempool-built (non-MEV-Boost) blocks
+
+Two bases are shown throughout:
+  • priority fees   = Σ (effectiveGasPrice - baseFee)·gasUsed        (tips only)
+  • validator reward = the MEV-Boost relay winning bid the proposer received,
+                        which equals priority fees for a locally-built block.
+
+"Local" blocks are those the proposer built itself (no relay payment); in the
+take calc those have validator reward == priority fees, so we detect them as
+take == fee.
+
+Uses the day_cache table if present (fast); otherwise scans the raw blocks.
+
+Usage:
+  python3 block_stats.py --since 2026-04-01            # mainnet
+  python3 block_stats.py --sepolia --since 2026-04-01  # sepolia
+"""
+import os
+import sys
+import json
+import sqlite3
+import argparse
+from datetime import datetime, timezone
+
+import numpy as np
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+NETS = {"mainnet": "blocks_cache.sqlite", "sepolia": "blocks_cache_sepolia.sqlite"}
+
+
+def block_take(block, fees):
+    """Validator reward: the builder→proposer payment for an MEV-Boost block, else
+    the priority-fee sum (same logic as build_history.py / server.py)."""
+    txs = block.get("transactions") or []
+    if not txs:
+        return fees
+    last = txs[-1]
+    if not isinstance(last, dict) or "value" not in last:
+        return fees
+    mev_pay = int(last["value"], 16) / 1e18
+    data = last.get("input", "0x") or "0x"
+    mp = last.get("maxPriorityFeePerGas")
+    maxprio = int(mp, 16) if mp else 0
+    extra = block.get("extraData", "0x") or "0x"
+    try:
+        builder = bytes.fromhex(extra[2:]).decode("utf-8", "replace")
+    except ValueError:
+        builder = ""
+    builder = "".join(c for c in builder if c >= " " and c != "�").strip()
+    bl = builder.lower()
+    vanilla = ("geth" in bl or "nethermind" in bl or len(builder) < 2
+               or mev_pay == 0 or data != "0x" or maxprio > 0)
+    return fees if vanilla else mev_pay
+
+
+def from_day_cache(conn, since):
+    rows = conn.execute(
+        "SELECT day, fee, take FROM day_cache WHERE day >= ? ORDER BY day", (since,)
+    ).fetchall()
+    if not rows:
+        return None
+    fee = np.concatenate([np.frombuffer(f, np.float64) for _, f, _ in rows])
+    take = np.concatenate([np.frombuffer(t, np.float64) for _, _, t in rows])
+    return fee, take, (rows[0][0], rows[-1][0])
+
+
+def from_raw(conn, since):
+    since_ts = int(datetime.strptime(since, "%Y-%m-%d")
+                   .replace(tzinfo=timezone.utc).timestamp())
+    fees, takes = [], []
+    d0 = d1 = None
+    for _num, bd, rd in conn.execute(
+        "SELECT b.number, b.data, r.data FROM blocks b "
+        "LEFT JOIN receipts r ON b.number = r.number WHERE b.full = 1"
+    ):
+        if bd is None:
+            continue
+        block = json.loads(bd)
+        ts = block.get("timestamp")
+        if ts is None:
+            continue
+        tsi = int(ts, 16)
+        if tsi < since_ts:
+            continue
+        base = int(block["baseFeePerGas"], 16)
+        if not block.get("transactions") or rd is None:
+            reward = 0.0
+        else:
+            reward = sum(
+                (int(x["effectiveGasPrice"], 16) - base) * int(x["gasUsed"], 16)
+                for x in json.loads(rd)
+                if int(x["effectiveGasPrice"], 16) > base
+            ) / 1e18
+        fees.append(reward)
+        takes.append(block_take(block, reward))
+        day = datetime.fromtimestamp(tsi, tz=timezone.utc).strftime("%Y-%m-%d")
+        d0 = day if d0 is None or day < d0 else d0
+        d1 = day if d1 is None or day > d1 else d1
+    if not fees:
+        return None
+    return np.asarray(fees), np.asarray(takes), (d0, d1)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Per-block reward stats over a date range.")
+    ap.add_argument("--since", default="2026-04-01",
+                    help="UTC day (YYYY-MM-DD), inclusive (default 2026-04-01).")
+    ap.add_argument("--network", choices=sorted(NETS), default="mainnet")
+    ap.add_argument("--sepolia", action="store_true", help="Shorthand for --network sepolia.")
+    args = ap.parse_args()
+
+    net = "sepolia" if args.sepolia else args.network
+    db = os.path.join(BASE, NETS[net])
+    if not os.path.exists(db):
+        sys.exit(f"No cache at {db}")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.execute("PRAGMA busy_timeout=60000")
+
+    src = "day_cache"
+    try:
+        res = from_day_cache(conn, args.since)
+    except sqlite3.OperationalError:
+        res = None
+    if res is None:
+        src = "raw scan"
+        res = from_raw(conn, args.since)
+    if res is None:
+        sys.exit(f"No blocks found on/after {args.since} in {os.path.basename(db)}")
+
+    fee, take, (d0, d1) = res
+    n = fee.size
+    local = take == fee                # non-MEV-Boost (proposer-built) blocks
+    nz = fee > 0
+
+    def mm(a):
+        return (float(np.mean(a)), float(np.median(a))) if a.size else (float("nan"), float("nan"))
+
+    print(f"[{net}] source: {src}")
+    print(f"Period: {d0} → {d1}   ({n:,} blocks)")
+    print(f"Local / mempool (non-MEV-Boost) blocks: {int(local.sum()):,} "
+          f"({100 * local.mean():.1f}% of blocks)   |   zero-reward blocks: {int((~nz).sum()):,}")
+    print("=" * 64)
+
+    print("1) Lowest block reward in the period")
+    print(f"     priority fees  : {fee.min():.6f} ETH")
+    print(f"     validator rwd  : {take.min():.6f} ETH")
+    if nz.any():
+        print(f"     (lowest non-zero — fees {fee[nz].min():.6f}, "
+              f"validator {take[take > 0].min():.6f} ETH)")
+    print()
+
+    mf, medf = mm(fee)
+    mt, medt = mm(take)
+    print("2) All blocks")
+    print(f"     priority fees  : mean {mf:.6f}   median {medf:.6f} ETH")
+    print(f"     validator rwd  : mean {mt:.6f}   median {medt:.6f} ETH")
+    print()
+
+    lmean, lmed = mm(fee[local])
+    print("3) Local / mempool blocks only  (validator reward == priority fees)")
+    print(f"     reward         : mean {lmean:.6f}   median {lmed:.6f} ETH")
+
+
+if __name__ == "__main__":
+    main()
