@@ -114,6 +114,9 @@ def main():
                     help="UTC day (YYYY-MM-DD), inclusive (default 2026-04-01).")
     ap.add_argument("--network", choices=sorted(NETS), default="mainnet")
     ap.add_argument("--sepolia", action="store_true", help="Shorthand for --network sepolia.")
+    ap.add_argument("--low", type=int, default=0, metavar="N",
+                    help="Also list the N lowest non-zero blocks (validator reward), "
+                         "ascending with the ratio to the previous value, to reveal any gap.")
     args = ap.parse_args()
 
     net = "sepolia" if args.sepolia else args.network
@@ -166,6 +169,32 @@ def main():
     lmean, lmed = mm(fee[local])
     print("3) Local / mempool blocks only  (validator reward == priority fees)")
     print(f"     reward         : mean {lmean:.6f}   median {lmed:.6f} ETH")
+    print()
+
+    # 4) How much more a MEV-Boost (relay) block pays the proposer than a local one.
+    mev = ~local
+    mev_mean, mev_med = mm(take[mev])
+    loc_mean, loc_med = mm(take[local])
+    print("4) MEV-Boost vs local (validator reward received by the proposer)")
+    print(f"     MEV-Boost blocks ({int(mev.sum()):,}) : mean {mev_mean:.6f}   median {mev_med:.6f} ETH")
+    print(f"     local blocks     ({int(local.sum()):,}) : mean {loc_mean:.6f}   median {loc_med:.6f} ETH")
+    if loc_mean > 0:
+        print(f"     → a MEV-Boost block pays on average {mev_mean - loc_mean:+.6f} ETH "
+              f"({mev_mean / loc_mean:.2f}× as much); median difference {mev_med - loc_med:+.6f} ETH")
+    print(f"     (local group includes {int((take == fee)[~nz].sum()):,} zero-reward blocks — "
+          f"negligible effect on the averages)")
+
+    if args.low:
+        nzv = np.sort(take[take > 0])
+        k = min(args.low, nzv.size)
+        print()
+        print(f"Lowest {k} non-zero blocks by validator reward (ascending; ratio to previous "
+              f"— a big jump marks a gap between noise and the real floor):")
+        prev = None
+        for v in nzv[:k]:
+            ratio = f"   ({v / prev:.1f}× prev)" if prev else ""
+            print(f"     {v:.8f} ETH{ratio}")
+            prev = v
 
 
 if __name__ == "__main__":
