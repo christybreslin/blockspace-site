@@ -278,7 +278,8 @@ def main():
             print(f"     NOTE: 'bps of EL rewards' is a % of the tips+MEV pool, NOT of staking yield "
                   f"(pass --el-apr X to convert).")
         print(f"     NOTE: both local-yield proxies likely OVERstate local yield on these low-bid "
-              f"slots (private orderflow / selection bias), so treat a 'gain' as, at best, break-even.")
+              f"slots (private orderflow / selection bias). A modeled 'gain' is not reliable — "
+              f"the economically conservative expectation is a small loss to break-even.")
 
     if args.low:
         nzv = np.sort(take[take > 0])
