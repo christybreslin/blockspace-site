@@ -127,9 +127,13 @@ def main():
                     help="Drop blocks whose validator reward is below this (ETH) before any "
                          "stats — use it to eliminate zero/dust blocks once you've found the floor.")
     ap.add_argument("--bid", type=float, default=0.0, metavar="ETH",
-                    help="Min-bid analysis: assuming we get every block, how much value sits "
+                    help="Cap analysis: assuming we get every block, how much value sits "
                          "above this bid (left on the table if we cap each block at it), and "
                          "the total if every block realised a flat bid.")
+    ap.add_argument("--min-bid", type=float, default=0.0, metavar="ETH",
+                    help="MEV-Boost min-bid model: relay blocks whose bid is below this switch "
+                         "to local building (earn priority fees instead of the relay bid). "
+                         "Reports the earnings lost, in ETH and basis points of total.")
     args = ap.parse_args()
 
     net = "sepolia" if args.sepolia else args.network
@@ -224,6 +228,34 @@ def main():
         print(f"        total                  : {flat:,.2f} ETH   "
               f"({flat - total:+,.2f} ETH vs the blocks' actual value — "
               f"{'more' if flat >= total else 'less'} than they are worth)")
+
+    # 6) MEV-Boost min-bid: relay blocks bidding below B build locally instead.
+    if args.min_bid > 0:
+        B = args.min_bid
+        baseline = float(take.sum())                 # take every relay bid (today)
+        relay = take != fee                          # MEV-Boost blocks (bid = take)
+        switch = relay & (take < B)                  # these fall back to local
+        n_sw = int(switch.sum())
+        lost_relay = float(take[switch].sum())       # relay value given up on them
+        loc = fee[take == fee]                       # observed local blocks
+        avg_local = float(loc.mean()) if loc.size else 0.0
+        own_fees = float(fee[switch].sum())          # each switched slot's own priority fees
+
+        def _bps(x):
+            return 10000 * x / baseline if baseline else 0.0
+
+        loss_own = lost_relay - own_fees                 # earn each slot's own local fees
+        loss_avg = lost_relay - n_sw * avg_local         # earn the fleet-average local block
+        print()
+        print(f"6) MEV-Boost min-bid {B} ETH — relay blocks below the bid build locally instead")
+        print(f"     affected relay blocks : {n_sw:,} ({100 * n_sw / n:.1f}% of all blocks)")
+        print(f"     baseline earnings (take every relay bid) : {baseline:,.2f} ETH")
+        print(f"     relay value given up on those blocks     : {lost_relay:,.2f} ETH")
+        print(f"     net earnings LOST after building locally, by local-yield assumption:")
+        print(f"        each slot's own priority fees (avg {own_fees / n_sw if n_sw else 0:.4f}) : "
+              f"{loss_own:,.2f} ETH  =  {_bps(loss_own):.1f} bps")
+        print(f"        fleet-average local block ({avg_local:.4f})        : "
+              f"{loss_avg:,.2f} ETH  =  {_bps(loss_avg):.1f} bps")
 
     if args.low:
         nzv = np.sort(take[take > 0])
