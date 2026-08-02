@@ -240,8 +240,25 @@ def main():
 
     # MEV-Boost min-bid: relay blocks bidding below B build locally instead.
     if args.min_bid > 0:
-        sec += 1
         B = args.min_bid
+
+        # Same as section 4, but restricted to blocks UNDER the min-bid — the
+        # population the min-bid actually acts on.
+        sec += 1
+        under = take < B
+        mev_u, loc_u = under & (take != fee), under & (take == fee)
+        muem, mumed = mm(take[mev_u])
+        luem, lumed = mm(take[loc_u])
+        print()
+        print(f"{sec}) MEV-Boost vs local — blocks under the {B} ETH min-bid only")
+        print(f"     MEV-Boost blocks ({int(mev_u.sum()):,}) : mean {muem:.6f}   median {mumed:.6f} ETH")
+        print(f"     local blocks     ({int(loc_u.sum()):,}) : mean {luem:.6f}   median {lumed:.6f} ETH")
+        if luem > 0:
+            print(f"     → under {B} ETH, a MEV-Boost block pays on average {muem - luem:+.6f} ETH; "
+                  f"median difference {mumed - lumed:+.6f} ETH")
+
+        # Min-bid analysis proper.
+        sec += 1
         baseline = float(take.sum())                 # take every relay bid (today)
         relay = take != fee                          # MEV-Boost blocks (bid = take)
         switch = relay & (take < B)                  # these fall back to local
