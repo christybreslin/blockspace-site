@@ -251,6 +251,15 @@ def main():
         avg_local = float(loc.mean()) if loc.size else 0.0
         own_fees = float(fee[switch].sum())          # each switched slot's own priority fees
 
+        # Like-for-like: compare only blocks BELOW the bid — the relay blocks that
+        # switch vs local blocks in the same low-value range. Medians, so high-value
+        # blocks (which never switch) don't distort either side.
+        relay_below = take[switch]                    # relay bids that switch (all < B)
+        local_below = take[local & (take < B)]        # local blocks below B (take == fee)
+        med_relay_below = float(np.median(relay_below)) if relay_below.size else 0.0
+        med_local_below = float(np.median(local_below)) if local_below.size else 0.0
+        change_medb = n_sw * (med_local_below - med_relay_below)   # + gain / - loss
+
         # bps here is a share of the EXECUTION-LAYER reward pool (tips + MEV), NOT of
         # total staking yield. Pass --el-apr to also express it as bps of yield.
         def _elbps(x):
@@ -274,6 +283,11 @@ def main():
               f"{change_own:+,.2f} ETH  =  {_elbps(change_own):+.1f} bps of EL rewards{_yield(_elbps(change_own))}")
         print(f"        average local block ({avg_local:.4f})               : "
               f"{change_avg:+,.2f} ETH  =  {_elbps(change_avg):+.1f} bps of EL rewards{_yield(_elbps(change_avg))}")
+        print(f"        below-bid medians  relay {med_relay_below:.4f} vs local {med_local_below:.4f} "
+              f"(gap {med_relay_below - med_local_below:+.4f}) : "
+              f"{change_medb:+,.2f} ETH  =  {_elbps(change_medb):+.1f} bps of EL rewards{_yield(_elbps(change_medb))}")
+        print(f"     (the below-bid median line is the like-for-like basis: only blocks under {B} ETH, "
+              f"medians on both sides.)")
         if args.el_apr <= 0:
             print(f"     NOTE: 'bps of EL rewards' is a % of the tips+MEV pool, NOT of staking yield "
                   f"(pass --el-apr X to convert).")
